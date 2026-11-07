@@ -15,6 +15,9 @@
 #include "mcp_server.h"
 #include "system_info.h"
 
+#include <freertos/FreeRTOS.h>
+#include <freertos/task.h>
+
 #define TAG "Esp32Camera"
 
 #if CONFIG_XIAOZHI_CAMERA_MIRROR_CONFIGURED
@@ -47,6 +50,13 @@ Esp32Camera::Esp32Camera(const camera_config_t& config) {
         s->set_vflip(s, kConfiguredVFlip ? 1 : 0);
 #endif
         ESP_LOGI(TAG, "Camera initialized: format=%d", config.pixel_format);
+    }
+
+    // JPEG without PSRAM DMA logs "NO-SOI" for every bad idle frame. Keep the
+    // sensor running: OV2640 software standby stops answering SCCB, so a later
+    // capture cannot wake it. Hide that idle warning instead.
+    if (config.pixel_format == PIXFORMAT_JPEG) {
+        esp_log_level_set("cam_hal", ESP_LOG_ERROR);
     }
 
     streaming_on_ = true;
