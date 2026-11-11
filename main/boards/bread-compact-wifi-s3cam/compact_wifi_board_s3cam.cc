@@ -4,12 +4,12 @@
 #include "config.h"
 #include "display/lcd_display.h"
 #include "esp32_camera.h"
-#include "lamp_controller.h"
+#include "kodo_face_display.h"
 #include "kodo_light.h"
+#include "lamp_controller.h"
 #include "mcp_server.h"
 #include "system_reset.h"
 #include "wifi_board.h"
-#include "xiaorui_face_display.h"
 
 #include <driver/i2c_master.h>
 #include <driver/spi_common.h>
@@ -149,9 +149,9 @@ private:
 #ifdef LCD_TYPE_GC9A01_SERIAL
         panel_config.vendor_config = &gc9107_vendor_config;
 #endif
-        display_ = new XiaoruiFaceDisplay(panel_io, panel, DISPLAY_WIDTH, DISPLAY_HEIGHT,
-                                          DISPLAY_OFFSET_X, DISPLAY_OFFSET_Y, DISPLAY_MIRROR_X,
-                                          DISPLAY_MIRROR_Y, DISPLAY_SWAP_XY);
+        display_ = new KodoFaceDisplay(panel_io, panel, DISPLAY_WIDTH, DISPLAY_HEIGHT,
+                                       DISPLAY_OFFSET_X, DISPLAY_OFFSET_Y, DISPLAY_MIRROR_X,
+                                       DISPLAY_MIRROR_Y, DISPLAY_SWAP_XY);
     }
 
     void InitializeCamera() {

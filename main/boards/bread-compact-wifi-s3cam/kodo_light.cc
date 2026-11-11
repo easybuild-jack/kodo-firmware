@@ -233,7 +233,7 @@ void KodoLight::OnStateChanged() {
                  DeviceStateMachine::GetStateName(state), EffectName(ambient_.effect));
         return;
     }
-    // Matches XiaoruiFaceDisplay: the sleeping face survives the good-night reply and idle,
+    // Matches KodoFaceDisplay: the sleeping face survives the good-night reply and idle,
     // any other state (wake word, button) wakes the robot.
     if (!sleeping_ || state == kDeviceStateIdle || state == kDeviceStateSpeaking ||
         state == kDeviceStateNotifying) {
