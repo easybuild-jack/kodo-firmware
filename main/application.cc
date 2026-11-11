@@ -14,6 +14,7 @@
 
 #include <driver/gpio.h>
 #include <esp_log.h>
+#include <esp_random.h>
 #include <arpa/inet.h>
 #include <cJSON.h>
 #include <algorithm>
@@ -86,6 +87,11 @@ void Application::Initialize() {
     };
     callbacks.on_wake_word_detected = [this](const std::string& wake_word) {
         xEventGroupSetBits(event_group_, MAIN_EVENT_WAKE_WORD_DETECTED);
+    };
+    callbacks.on_local_command = [this](const std::string& text) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        pending_local_command_ = text;
+        xEventGroupSetBits(event_group_, MAIN_EVENT_LOCAL_COMMAND);
     };
     callbacks.on_vad_change = [this](bool speaking) {
         xEventGroupSetBits(event_group_, MAIN_EVENT_VAD_CHANGE);
@@ -192,18 +198,39 @@ void Application::Run() {
         MAIN_EVENT_VAD_CHANGE | MAIN_EVENT_CLOCK_TICK | MAIN_EVENT_ERROR |
         MAIN_EVENT_NETWORK_CONNECTED | MAIN_EVENT_NETWORK_DISCONNECTED | MAIN_EVENT_TOGGLE_CHAT |
         MAIN_EVENT_START_LISTENING | MAIN_EVENT_STOP_LISTENING | MAIN_EVENT_ACTIVATION_DONE |
-        MAIN_EVENT_STATE_CHANGED | MAIN_EVENT_PLAYBACK_DRAINED | MAIN_EVENT_STARTUP_HINT_TIMEOUT;
+        MAIN_EVENT_STATE_CHANGED | MAIN_EVENT_PLAYBACK_DRAINED | MAIN_EVENT_STARTUP_HINT_TIMEOUT |
+        MAIN_EVENT_LOCAL_COMMAND;
 
     while (true) {
         auto bits = xEventGroupWaitBits(event_group_, ALL_EVENTS, pdTRUE, pdFALSE, portMAX_DELAY);
 
         if (bits & MAIN_EVENT_ERROR) {
-            if (GetDeviceState() == kDeviceStateNotifying) {
+            // Only the protocol raises this, so it always means the server or the
+            // network is unreachable. That is not a device fault and never shows
+            // the error screen. The device only speaks up when someone is waiting
+            // for it; a background failure is checked again at the next wake.
+            ESP_LOGW(TAG, "Server error: %s", last_error_message_.c_str());
+            last_error_message_.clear();
+            auto state = GetDeviceState();
+            const bool user_waiting = offline_wake_pending_ || state == kDeviceStateConnecting ||
+                                      state == kDeviceStateListening ||
+                                      state == kDeviceStateSpeaking;
+            offline_wake_pending_ = false;
+            if (state == kDeviceStateNotifying) {
                 StopNotification();
             }
-            SetDeviceState(kDeviceStateIdle);
-            Alert(Lang::Strings::ERROR, last_error_message_.c_str(), "cancel",
-                  Lang::Sounds::OGG_EXCLAMATION);
+            if (user_waiting) {
+                offline_fail_reason_ = Board::GetInstance().IsNetworkConnected()
+                                           ? OfflineFailReason::kNoServer
+                                           : OfflineFailReason::kNoNetwork;
+                ArmOfflineCommandSession();
+                if (GetDeviceState() != kDeviceStateIdle) {
+                    SetDeviceState(kDeviceStateIdle);
+                } else {
+                    ShowOfflineCommandUi();
+                    audio_service_.EnableWakeWordDetection(true);
+                }
+            }
         }
 
         if (bits & MAIN_EVENT_NETWORK_CONNECTED) {
@@ -256,6 +283,14 @@ void Application::Run() {
                     // MAIN_EVENT_SEND_AUDIO event would ever be triggered again.
                     while (audio_service_.PopPacketFromSendQueue())
                         ;
+                    // A dead socket used to leave the device in listening with the
+                    // recognizer stopped. Return to idle so the wake word works; the
+                    // next wake checks the network and the server again.
+                    if (!protocol_->IsAudioChannelOpened() &&
+                        GetDeviceState() == kDeviceStateListening) {
+                        ESP_LOGW(TAG, "Audio uplink lost, returning to idle");
+                        SetDeviceState(kDeviceStateIdle);
+                    }
                     break;
                 }
             }
@@ -279,6 +314,10 @@ void Application::Run() {
             for (auto& task : tasks) {
                 task();
             }
+        }
+
+        if (bits & MAIN_EVENT_LOCAL_COMMAND) {
+            HandleLocalCommandEvent();
         }
 
         if (bits & MAIN_EVENT_CLOCK_TICK) {
@@ -336,7 +375,11 @@ void Application::HandleNetworkDisconnectedEvent() {
     if (state == kDeviceStateConnecting || state == kDeviceStateListening ||
         state == kDeviceStateSpeaking) {
         ESP_LOGI(TAG, "Closing audio channel due to network disconnection");
+        // Someone is talking to the device, so say why it stopped.
+        offline_fail_reason_ = OfflineFailReason::kNoNetwork;
+        ArmOfflineCommandSession();
         protocol_->CloseAudioChannel();
+        SetDeviceState(kDeviceStateIdle);
     }
 
     // Update the status bar immediately to show the network state
@@ -351,6 +394,9 @@ void Application::HandleActivationDoneEvent() {
     SetDeviceState(kDeviceStateIdle);
 
     has_server_time_ = ota_->HasServerTime();
+    // The server is checked again, and the user told, at the first wake.
+    const bool server_unreachable = server_check_failed_;
+    server_check_failed_ = false;
 
     // Protocol start may have already raised MAIN_EVENT_ERROR. Do not replace
     // that alert with the "ready" UI/sound — the main loop can process both
@@ -372,7 +418,7 @@ void Application::HandleActivationDoneEvent() {
     auto& board = Board::GetInstance();
     board.SetPowerSaveLevel(PowerSaveLevel::LOW_POWER);
 
-    if (!has_error) {
+    if (!has_error && !server_unreachable) {
         Schedule([this]() {
             // Play the success sound to indicate the device is ready
             audio_service_.PlaySound(Lang::Sounds::OGG_SUCCESS);
@@ -477,29 +523,19 @@ void Application::CheckNewVersion() {
         auto check = ota_->CheckVersion();
         if (!check) {
             retry_count++;
-            if (retry_count >= MAX_RETRY) {
-                ESP_LOGE(TAG, "Too many retries, exit version check");
+            ESP_LOGW(TAG, "Check new version failed: %s", check.error().ToString().c_str());
+            // A server saved by an earlier check is enough to start. Retrying here
+            // would keep wake detection off for minutes while the server is down.
+            if (HasSavedServerConfig()) {
+                ESP_LOGW(TAG, "Server unreachable, starting with the saved server config");
+                server_check_failed_ = true;
                 return;
             }
-
-            const auto& err = check.error();
-            char error_message[160];
-            int error_message_length =
-                snprintf(error_message, sizeof(error_message), "%s", err.ToString().c_str());
-            if (error_message_length < 0 ||
-                error_message_length >= static_cast<int>(sizeof(error_message))) {
-                snprintf(error_message, sizeof(error_message), "%s", err.Message());
+            if (retry_count >= MAX_RETRY) {
+                ESP_LOGE(TAG, "Too many retries, exit version check");
+                server_check_failed_ = true;
+                return;
             }
-
-            char buffer[320];
-            int alert_message_length =
-                snprintf(buffer, sizeof(buffer), Lang::Strings::CHECK_NEW_VERSION_FAILED,
-                         retry_delay, error_message);
-            if (alert_message_length < 0 ||
-                alert_message_length >= static_cast<int>(sizeof(buffer))) {
-                snprintf(buffer, sizeof(buffer), "%s", err.Message());
-            }
-            Alert(Lang::Strings::ERROR, buffer, "cloud_off", Lang::Sounds::OGG_EXCLAMATION);
 
             ESP_LOGW(TAG, "Check new version failed, retry in %d seconds (%d/%d)", retry_delay,
                      retry_count, MAX_RETRY);
@@ -553,6 +589,11 @@ void Application::CheckNewVersion() {
     }
 }
 
+bool Application::HasSavedServerConfig() {
+    return !Settings("mqtt", false).GetString("endpoint").empty() ||
+           !Settings("websocket", false).GetString("url").empty();
+}
+
 void Application::InitializeProtocol() {
     auto& board = Board::GetInstance();
     auto display = board.GetDisplay();
@@ -563,6 +604,12 @@ void Application::InitializeProtocol() {
     if (ota_->HasMqttConfig()) {
         protocol_ = std::make_unique<MqttProtocol>();
     } else if (ota_->HasWebsocketConfig()) {
+        protocol_ = std::make_unique<WebsocketProtocol>();
+    } else if (!Settings("mqtt", false).GetString("endpoint").empty()) {
+        ESP_LOGW(TAG, "No protocol from the OTA check, using the saved MQTT config");
+        protocol_ = std::make_unique<MqttProtocol>();
+    } else if (!Settings("websocket", false).GetString("url").empty()) {
+        ESP_LOGW(TAG, "No protocol from the OTA check, using the saved websocket config");
         protocol_ = std::make_unique<WebsocketProtocol>();
     } else {
         ESP_LOGW(TAG, "No protocol specified in the OTA config, using MQTT");
@@ -594,9 +641,12 @@ void Application::InitializeProtocol() {
 
     protocol_->OnAudioChannelClosed([this, &board]() {
         board.SetPowerSaveLevel(PowerSaveLevel::LOW_POWER);
+        // A close is not treated as a server failure: servers also close the
+        // socket when a session ends normally. The next wake checks again.
         Schedule([this]() {
-            auto display = Board::GetInstance().GetDisplay();
-            display->SetChatMessage("system", "");
+            if (!offline_commands_active_) {
+                Board::GetInstance().GetDisplay()->SetChatMessage("system", "");
+            }
             SetDeviceState(kDeviceStateIdle);
         });
     });
@@ -852,20 +902,24 @@ void Application::ContinueOpenAudioChannel(ListeningMode mode) {
     if (GetDeviceState() != kDeviceStateConnecting) {
         return;
     }
-
     // Switch to performance mode before connecting to reduce latency
     auto& board = Board::GetInstance();
     board.SetPowerSaveLevel(PowerSaveLevel::PERFORMANCE);
 
+    if (!board.IsNetworkConnected()) {
+        offline_fail_reason_ = OfflineFailReason::kNoNetwork;
+        FailOpenIntoOfflineSession();
+        return;
+    }
     if (!protocol_->IsAudioChannelOpened()) {
         if (!protocol_->OpenAudioChannel()) {
-            // Return to idle so the device is not stuck in the connecting
-            // state (not every failure path reports a network error)
-            SetDeviceState(kDeviceStateIdle);
+            offline_fail_reason_ = OfflineFailReason::kNoServer;
+            FailOpenIntoOfflineSession();
             return;
         }
     }
 
+    EndOfflineCommandSession();
     SetListeningMode(mode);
 }
 
@@ -945,8 +999,7 @@ void Application::HandleWakeWordDetectedEvent() {
         if (state == kDeviceStateListening) {
             protocol_->SendStartListening(GetDefaultListeningMode());
             audio_service_.ResetDecoder();
-            audio_service_.PlaySound(Lang::Sounds::OGG_WOZAI);
-            Board::GetInstance().GetDisplay()->SetChatMessage("assistant", "我在");
+            PlayWakeAck();
             // Re-enable wake word detection as it was stopped by the detection itself
             audio_service_.EnableWakeWordDetection(true);
         } else {
@@ -960,8 +1013,112 @@ void Application::HandleWakeWordDetectedEvent() {
     }
 }
 
+void Application::ArmOfflineCommandSession() {
+    // Re-armed on every failed attempt, so each wake that cannot reach the
+    // server gets its own spoken reply.
+    ESP_LOGI(TAG, "On-device commands enabled (%s)",
+             offline_fail_reason_ == OfflineFailReason::kNoNetwork ? "no network"
+                                                                   : "server unreachable");
+    offline_commands_active_ = true;
+    show_offline_greeting_ = true;
+}
+
+void Application::ShowOfflineCommandUi() {
+    auto display = Board::GetInstance().GetDisplay();
+    wake_ack_playing_ = false;
+    const char* text = "网是通的呀，可是服务器没人应我";
+    auto sound = Lang::Sounds::OGG_NOSERVER;
+    if (offline_fail_reason_ == OfflineFailReason::kNoNetwork) {
+        text = "哎呀，我把网络弄丢啦，请帮我检查一下";
+        sound = Lang::Sounds::OGG_NONET;
+    }
+    display->SetStatus(Lang::Strings::STANDBY);
+    if (show_offline_greeting_) {
+        show_offline_greeting_ = false;
+        display->SetChatMessage("assistant", text);
+        audio_service_.PlaySound(sound);
+    }
+    audio_service_.SetLocalCommandsEnabled(true);
+}
+
+void Application::EndOfflineCommandSession() {
+    const bool was_active = offline_commands_active_ || show_offline_greeting_;
+    offline_commands_active_ = false;
+    show_offline_greeting_ = false;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        pending_local_command_.clear();
+    }
+    audio_service_.SetLocalCommandsEnabled(false);
+    if (!was_active || GetDeviceState() != kDeviceStateIdle || !last_error_message_.empty()) {
+        return;
+    }
+    auto display = Board::GetInstance().GetDisplay();
+    display->SetStatus(Lang::Strings::STANDBY);
+    display->ClearChatMessages();
+    display->SetEmotion("neutral");
+}
+
+void Application::FailOpenIntoOfflineSession() {
+    if ((xEventGroupGetBits(event_group_) & MAIN_EVENT_ERROR) != 0) {
+        offline_wake_pending_ = true;
+        return;
+    }
+    ArmOfflineCommandSession();
+    if (GetDeviceState() != kDeviceStateIdle) {
+        SetDeviceState(kDeviceStateIdle);
+        return;
+    }
+    ShowOfflineCommandUi();
+    audio_service_.EnableWakeWordDetection(true);
+}
+
+void Application::HandleLocalCommandEvent() {
+    std::string text;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        text.swap(pending_local_command_);
+    }
+    if (text.empty()) {
+        return;
+    }
+    // Only while the server session could not be opened. A live session belongs
+    // to the backend, which answers as well as performing the action.
+    if (!offline_commands_active_) {
+        ESP_LOGI(TAG, "Local command ignored, server session is active: %s", text.c_str());
+        return;
+    }
+    ESP_LOGI(TAG, "Offline command: %s", text.c_str());
+    auto display = Board::GetInstance().GetDisplay();
+    if (!Board::GetInstance().HandleUserUtterance(text)) {
+        display->SetChatMessage("assistant", "这个要连着服务器");
+    }
+    if (GetDeviceState() == kDeviceStateIdle) {
+        display->SetStatus(Lang::Strings::STANDBY);
+    }
+}
+
+void Application::PlayWakeAck() {
+    struct Line {
+        const char* text;
+        std::string_view sound;
+    };
+    static const Line kLines[] = {
+        {"我在呢", Lang::Sounds::OGG_WOZAIME},
+        {"时刻准备着", Lang::Sounds::OGG_SHIKE},
+        {"来啦，你说", Lang::Sounds::OGG_LAILA},
+    };
+    const Line& line = kLines[esp_random() % (sizeof(kLines) / sizeof(kLines[0]))];
+    Board::GetInstance().GetDisplay()->SetChatMessage("assistant", line.text);
+    audio_service_.PlaySound(line.sound);
+    wake_ack_playing_ = true;
+}
+
 void Application::BeginWakeWordInvoke(const std::string& wake_word) {
     idle_after_turn_ = false;
+    // Local reply first. It does not need a network, and it must start before
+    // the uplink attempt so a failed connection still gets an answer.
+    PlayWakeAck();
     // Must run in the main task with the device in idle state
     audio_service_.EncodeWakeWord();
 
@@ -995,16 +1152,20 @@ void Application::ContinueWakeWordInvoke(const std::string& wake_word) {
     auto& board = Board::GetInstance();
     board.SetPowerSaveLevel(PowerSaveLevel::PERFORMANCE);
 
+    if (!board.IsNetworkConnected()) {
+        offline_fail_reason_ = OfflineFailReason::kNoNetwork;
+        FailOpenIntoOfflineSession();
+        return;
+    }
     if (!protocol_->IsAudioChannelOpened()) {
         if (!protocol_->OpenAudioChannel()) {
-            // Return to idle so the device is not stuck in the connecting
-            // state (not every failure path reports a network error), and
-            // wake word detection is re-enabled by the idle state handler.
-            SetDeviceState(kDeviceStateIdle);
+            offline_fail_reason_ = OfflineFailReason::kNoServer;
+            FailOpenIntoOfflineSession();
             return;
         }
     }
 
+    EndOfflineCommandSession();
     ESP_LOGI(TAG, "Wake word detected: %s", wake_word.c_str());
 #if CONFIG_SEND_WAKE_WORD_DATA
     // Encode and send the wake word data to the server
@@ -1013,12 +1174,12 @@ void Application::ContinueWakeWordInvoke(const std::string& wake_word) {
     }
     // Set the chat state to wake word detected
     protocol_->SendWakeWordDetected(wake_word);
-    play_popup_on_listening_ = true;
+    play_popup_on_listening_ = false;
     SetListeningMode(GetDefaultListeningMode());
 #else
-    // Say "我在" after the state change. Playing it here would be cleared by
-    // ResetDecoder inside EnableVoiceProcessing.
-    play_popup_on_listening_ = true;
+    // The wake acknowledgement is already playing. ResetDecoder would drop it,
+    // so StartListeningAudio waits until that playback drains.
+    play_popup_on_listening_ = false;
     SetListeningMode(GetDefaultListeningMode());
 #endif
 }
@@ -1041,11 +1202,14 @@ void Application::HandleStateChangedEvent() {
             // Keep a just-raised network error visible. SetDeviceState(idle)
             // queues STATE_CHANGED after Alert(), and the idle handler would
             // otherwise wipe the status, emotion, and chat message.
-            if (last_error_message_.empty()) {
+            if (offline_commands_active_ && last_error_message_.empty()) {
+                ShowOfflineCommandUi();
+            } else if (last_error_message_.empty()) {
                 display->SetStatus(Lang::Strings::STANDBY);
                 display->ClearChatMessages();  // Clear messages first
                 display->SetEmotion(
                     "neutral");  // Then set emotion (wechat mode checks child count)
+                audio_service_.SetLocalCommandsEnabled(false);
             }
             audio_service_.EnableVoiceProcessing(false);
             audio_service_.EnableWakeWordDetection(true);
@@ -1174,16 +1338,18 @@ void Application::StartListeningAudio() {
         return;
     }
 
-    // Say the wake acknowledgement before opening the microphone. ResetDecoder
-    // would drop it, and the mic would record it.
+    // The wake acknowledgement is local. Wait until it finishes so opening the
+    // microphone does not wipe it or record it.
     if (play_popup_on_listening_) {
         play_popup_on_listening_ = false;
-        audio_service_.PlaySound(Lang::Sounds::OGG_WOZAI);
-        Board::GetInstance().GetDisplay()->SetChatMessage("assistant", "我在");
+        PlayWakeAck();
+    }
+    if (wake_ack_playing_) {
         if (!audio_service_.IsPlaybackIdle()) {
             pending_listening_start_ = true;
             return;
         }
+        wake_ack_playing_ = false;
     }
 
     // Send the start listening command

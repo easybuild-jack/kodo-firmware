@@ -37,6 +37,7 @@
 #define MAIN_EVENT_STATE_CHANGED (1 << 12)
 #define MAIN_EVENT_PLAYBACK_DRAINED (1 << 13)
 #define MAIN_EVENT_STARTUP_HINT_TIMEOUT (1 << 14)
+#define MAIN_EVENT_LOCAL_COMMAND (1 << 15)
 
 enum AecMode {
     kAecOff,
@@ -120,6 +121,7 @@ public:
     void PlaySound(const std::string_view& sound);
     // After the current spoken reply finishes, return to idle instead of listening.
     void RequestIdleAfterTurn();
+    bool IsOfflineCommandSession() const { return offline_commands_active_; }
     AudioService& GetAudioService() { return audio_service_; }
 
     /**
@@ -159,6 +161,17 @@ private:
     bool play_popup_on_listening_ =
         false;                      // Flag to play popup sound after state changes to listening
     bool idle_after_turn_ = false;  // Sleep request: idle when the current reply ends
+    // The server session could not be opened or has dropped. On-device phrases
+    // stay armed until a later attempt actually connects.
+    enum class OfflineFailReason { kNoNetwork, kNoServer };
+    bool offline_wake_pending_ = false;
+    bool offline_commands_active_ = false;
+    bool show_offline_greeting_ = false;
+    bool wake_ack_playing_ = false;
+    // Set by the activation task before MAIN_EVENT_ACTIVATION_DONE.
+    bool server_check_failed_ = false;
+    OfflineFailReason offline_fail_reason_ = OfflineFailReason::kNoServer;
+    std::string pending_local_command_;
     bool pending_listening_start_ =
         false;  // Waiting for playback to drain before starting listening (auto mode)
     int clock_ticks_ = 0;
@@ -174,8 +187,17 @@ private:
     void HandleActivationDoneEvent();
     void HandleWakeWordDetectedEvent();
     void ContinueOpenAudioChannel(ListeningMode mode);
+    void PlayWakeAck();
     void BeginWakeWordInvoke(const std::string& wake_word);
     void ContinueWakeWordInvoke(const std::string& wake_word);
+    void ArmOfflineCommandSession();
+    void ShowOfflineCommandUi();
+    void EndOfflineCommandSession();
+    void HandleLocalCommandEvent();
+    static bool HasSavedServerConfig();
+    // Connection failed while trying to listen. The error event, if one was
+    // queued, finishes the offline session; otherwise start it here.
+    void FailOpenIntoOfflineSession();
     void StartListeningAudio();
     void ConfigureWakeWordForListening();
     void ShowStartupWakeWordHint();

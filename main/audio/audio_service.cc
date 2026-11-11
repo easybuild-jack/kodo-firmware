@@ -99,6 +99,11 @@ void AudioService::Initialize(AudioCodec* codec) {
             callbacks_.on_wake_word_detected(wake_word);
         }
     });
+    audio_engine_->OnLocalCommand([this](const std::string& text) {
+        if (callbacks_.on_local_command) {
+            callbacks_.on_local_command(text);
+        }
+    });
 
     esp_timer_create_args_t audio_power_timer_args = {
         .callback =
@@ -660,6 +665,12 @@ std::unique_ptr<AudioStreamPacket> AudioService::PopWakeWordPacket() {
         return packet;
     }
     return nullptr;
+}
+
+void AudioService::SetLocalCommandsEnabled(bool enabled) {
+    if (audio_engine_ != nullptr) {
+        audio_engine_->SetLocalCommandsEnabled(enabled);
+    }
 }
 
 void AudioService::EnableWakeWordDetection(bool enable) {

@@ -303,6 +303,7 @@
 
 
 // A MCP Test: Control a lamp
-#define LAMP_GPIO GPIO_NUM_14
+// GPIO14 is now used by the 16-pixel WS2812 ring (see GetLed()).
+// #define LAMP_GPIO GPIO_NUM_14
 
 #endif // _BOARD_CONFIG_H_

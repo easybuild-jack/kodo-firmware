@@ -243,6 +243,10 @@ NetworkInterface* WifiBoard::GetNetwork() {
     return &network;
 }
 
+bool WifiBoard::IsNetworkConnected() const {
+    return WifiManager::GetInstance().IsConnected();
+}
+
 const char* WifiBoard::GetNetworkStateIcon() {
     auto& wifi = WifiManager::GetInstance();
 

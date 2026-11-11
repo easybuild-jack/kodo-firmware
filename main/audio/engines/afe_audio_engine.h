@@ -40,6 +40,8 @@ public:
     size_t GetFeedSize() const override;
 
     void OnWakeWordDetected(std::function<void(const std::string& wake_word)> callback) override;
+    void OnLocalCommand(std::function<void(const std::string& text)> callback) override;
+    void SetLocalCommandsEnabled(bool enabled) override;
     void OnOutput(std::function<void(std::vector<int16_t>&& data)> callback) override;
     void OnVadStateChange(std::function<void(bool speaking)> callback) override;
 
@@ -90,6 +92,7 @@ private:
     std::mutex input_buffer_mutex_;
 
     std::function<void(const std::string&)> wake_word_detected_callback_;
+    std::function<void(const std::string&)> local_command_callback_;
     std::function<void(std::vector<int16_t>&&)> output_callback_;
     std::function<void(bool)> vad_state_change_callback_;
 

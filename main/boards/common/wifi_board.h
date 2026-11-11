@@ -51,6 +51,7 @@ public:
     virtual NetworkInterface* GetNetwork() override;
     virtual void SetNetworkEventCallback(NetworkEventCallback callback) override;
     virtual const char* GetNetworkStateIcon() override;
+    virtual bool IsNetworkConnected() const override;
     virtual void SetPowerSaveLevel(PowerSaveLevel level) override;
     virtual AudioCodec* GetAudioCodec() override { return nullptr; }
     virtual std::string GetDeviceStatusJson() override;

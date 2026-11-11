@@ -80,6 +80,8 @@ public:
     virtual bool GetBatteryLevel(int& level, bool& charging, bool& discharging);
     virtual std::string GetSystemInfoJson();
     virtual void SetPowerSaveLevel(PowerSaveLevel level) = 0;
+    // False when this link has no route, such as Wi-Fi not associated.
+    virtual bool IsNetworkConnected() const { return true; }
     // Board-local handling of the user's recognized speech. Return true when consumed.
     virtual bool HandleUserUtterance(const std::string& text) {
         (void)text;

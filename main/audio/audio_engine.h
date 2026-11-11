@@ -15,7 +15,8 @@ class AudioEngine {
 public:
     virtual ~AudioEngine() = default;
 
-    virtual bool Initialize(AudioCodec* codec, int frame_duration_ms, srmodel_list_t* models_list) = 0;
+    virtual bool Initialize(AudioCodec* codec, int frame_duration_ms,
+                            srmodel_list_t* models_list) = 0;
     virtual void Feed(std::vector<int16_t>&& data) = 0;
 
     virtual void EnableWakeWordDetection(bool enable) = 0;
@@ -30,6 +31,11 @@ public:
     virtual size_t GetFeedSize() const = 0;
 
     virtual void OnWakeWordDetected(std::function<void(const std::string& wake_word)> callback) = 0;
+    // Fixed phrases recognized by MultiNet without a server. Default is a no-op.
+    virtual void OnLocalCommand(std::function<void(const std::string& text)> callback) {
+        (void)callback;
+    }
+    virtual void SetLocalCommandsEnabled(bool enabled) { (void)enabled; }
     virtual void OnOutput(std::function<void(std::vector<int16_t>&& data)> callback) = 0;
     virtual void OnVadStateChange(std::function<void(bool speaking)> callback) = 0;
 

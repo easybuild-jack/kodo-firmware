@@ -1129,6 +1129,8 @@ if(NOT LANG_DIR STREQUAL "en-US")
     endforeach()
 endif()
 
+# Evaluated at configure time. Adding a file under assets/common requires a
+# reconfigure; changing this list is enough to make idf.py build do that.
 file(GLOB COMMON_SOUNDS ${CMAKE_CURRENT_SOURCE_DIR}/assets/common/*.ogg)
 
 # If target chip is ESP32, exclude specific files to avoid build errors

@@ -5,7 +5,7 @@
 #include "display/lcd_display.h"
 #include "esp32_camera.h"
 #include "lamp_controller.h"
-#include "led/single_led.h"
+#include "kodo_light.h"
 #include "mcp_server.h"
 #include "system_reset.h"
 #include "wifi_board.h"
@@ -93,6 +93,8 @@ private:
     Button boot_button_;
     LcdDisplay* display_;
     Esp32Camera* camera_;
+    LampController* lamp_ = nullptr;
+    KodoLight* light_ = nullptr;
 
     void InitializeSpi() {
         spi_bus_config_t buscfg = {};
@@ -184,6 +186,7 @@ private:
     void EnterSleep() {
         Application::GetInstance().Schedule([this]() {
             GetDisplay()->SetPowerSaveMode(true);
+            light_->Sleep();
             auto& app = Application::GetInstance();
             app.RequestIdleAfterTurn();
             auto state = app.GetDeviceState();
@@ -194,11 +197,19 @@ private:
     }
 
     void InitializeTools() {
+        // GPIO14 drives the WS2812 ring, so the lamp test controller is disabled.
+        // static LampController lamp(LAMP_GPIO);
+        // lamp_ = &lamp;
+
+        // Created here so its self.light.* tools exist before the tool list is published.
+        light_ = new KodoLight(GPIO_NUM_14, 16);
+
         auto& mcp_server = McpServer::GetInstance();
         mcp_server.AddTool(
             "self.device.sleep",
             "Put the robot to sleep when the user asks to sleep, rest, or says good night. "
-            "The screen dims and shows the sleeping face until the wake word is heard.",
+            "The screen dims and shows the sleeping face and the LED ring turns off until the "
+            "wake word is heard.",
             PropertyList(), [this](const PropertyList&) -> ReturnValue {
                 EnterSleep();
                 return true;
@@ -217,11 +228,38 @@ private:
     }
 
     bool HandleUserUtterance(const std::string& text) override {
-        if (!WantsSleep(text)) {
+        // A connected session stays with the server so it can act and reply.
+        if (!Application::GetInstance().IsOfflineCommandSession()) {
             return false;
         }
-        EnterSleep();
-        return true;
+        if (WantsSleep(text)) {
+            EnterSleep();
+            return true;
+        }
+        const bool refused = text.find("不要") != std::string::npos ||
+                             text.find("别开") != std::string::npos ||
+                             text.find("别关") != std::string::npos;
+        if (!refused && text.find("开灯") != std::string::npos) {
+            if (lamp_ != nullptr) {
+                lamp_->TurnOn();
+            }
+            GetDisplay()->SetChatMessage("assistant", "灯开了");
+            return true;
+        }
+        if (!refused && text.find("关灯") != std::string::npos) {
+            if (lamp_ != nullptr) {
+                lamp_->TurnOff();
+            }
+            GetDisplay()->SetChatMessage("assistant", "灯关了");
+            return true;
+        }
+        if (text.find("左转") != std::string::npos || text.find("右转") != std::string::npos ||
+            text.find("前进") != std::string::npos || text.find("后退") != std::string::npos ||
+            text.find("停止") != std::string::npos) {
+            GetDisplay()->SetChatMessage("assistant", "这块板没有底盘，转不了");
+            return true;
+        }
+        return false;
     }
 
 public:
@@ -236,10 +274,7 @@ public:
         }
     }
 
-    virtual Led* GetLed() override {
-        static SingleLed led(BUILTIN_LED_GPIO);
-        return &led;
-    }
+    virtual Led* GetLed() override { return light_; }
 
     virtual AudioCodec* GetAudioCodec() override {
 #ifdef AUDIO_I2S_METHOD_SIMPLEX
