@@ -6,7 +6,6 @@
 #include "esp32_camera.h"
 #include "kodo_face_display.h"
 #include "kodo_light.h"
-#include "lamp_controller.h"
 #include "mcp_server.h"
 #include "system_reset.h"
 #include "wifi_board.h"
@@ -93,7 +92,6 @@ private:
     Button boot_button_;
     LcdDisplay* display_;
     Esp32Camera* camera_;
-    LampController* lamp_ = nullptr;
     KodoLight* light_ = nullptr;
 
     void InitializeSpi() {
@@ -197,10 +195,6 @@ private:
     }
 
     void InitializeTools() {
-        // GPIO14 drives the WS2812 ring, so the lamp test controller is disabled.
-        // static LampController lamp(LAMP_GPIO);
-        // lamp_ = &lamp;
-
         // Created here so its self.light.* tools exist before the tool list is published.
         light_ = new KodoLight(GPIO_NUM_14, 16);
 
@@ -240,16 +234,10 @@ private:
                              text.find("别开") != std::string::npos ||
                              text.find("别关") != std::string::npos;
         if (!refused && text.find("开灯") != std::string::npos) {
-            if (lamp_ != nullptr) {
-                lamp_->TurnOn();
-            }
             GetDisplay()->SetChatMessage("assistant", "灯开了");
             return true;
         }
         if (!refused && text.find("关灯") != std::string::npos) {
-            if (lamp_ != nullptr) {
-                lamp_->TurnOff();
-            }
             GetDisplay()->SetChatMessage("assistant", "灯关了");
             return true;
         }
