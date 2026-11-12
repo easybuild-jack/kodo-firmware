@@ -302,8 +302,6 @@
 #endif
 
 
-// A MCP Test: Control a lamp
-// GPIO14 is now used by the 16-pixel WS2812 ring (see GetLed()).
-// #define LAMP_GPIO GPIO_NUM_14
+// GPIO14 drives the 16-pixel WS2812 ring (KodoLight, see GetLed()).
 
 #endif // _BOARD_CONFIG_H_

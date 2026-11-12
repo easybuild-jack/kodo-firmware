@@ -1,4 +1,4 @@
-#include "xiaorui_face_display.h"
+#include "kodo_face_display.h"
 
 #include "assets/lang_config.h"
 #include "board.h"
@@ -36,14 +36,13 @@ void PaintText(lv_obj_t* label) {
 
 }  // namespace
 
-XiaoruiFaceDisplay::XiaoruiFaceDisplay(esp_lcd_panel_io_handle_t panel_io,
-                                       esp_lcd_panel_handle_t panel, int width, int height,
-                                       int offset_x, int offset_y, bool mirror_x, bool mirror_y,
-                                       bool swap_xy)
+KodoFaceDisplay::KodoFaceDisplay(esp_lcd_panel_io_handle_t panel_io, esp_lcd_panel_handle_t panel,
+                                 int width, int height, int offset_x, int offset_y, bool mirror_x,
+                                 bool mirror_y, bool swap_xy)
     : SpiLcdDisplay(panel_io, panel, width, height, offset_x, offset_y, mirror_x, mirror_y,
                     swap_xy) {}
 
-void XiaoruiFaceDisplay::SetupUI() {
+void KodoFaceDisplay::SetupUI() {
     if (setup_ui_called_) {
         return;
     }
@@ -105,7 +104,7 @@ void XiaoruiFaceDisplay::SetupUI() {
     ready_ = true;
 }
 
-void XiaoruiFaceDisplay::SetStatus(const char* status) {
+void KodoFaceDisplay::SetStatus(const char* status) {
     SpiLcdDisplay::SetStatus(status);
     if (!ready_ || status == nullptr) {
         return;
@@ -142,7 +141,7 @@ void XiaoruiFaceDisplay::SetStatus(const char* status) {
     Show(face);
 }
 
-bool XiaoruiFaceDisplay::SetEmotion(const char* emotion) {
+bool KodoFaceDisplay::SetEmotion(const char* emotion) {
     if (!ready_ || emotion == nullptr || emotion[0] == '\0') {
         return false;
     }
@@ -166,7 +165,7 @@ bool XiaoruiFaceDisplay::SetEmotion(const char* emotion) {
     return true;
 }
 
-void XiaoruiFaceDisplay::SetPowerSaveMode(bool on) {
+void KodoFaceDisplay::SetPowerSaveMode(bool on) {
     SetChatMessage("system", "");
     if (on) {
         sleeping_ = true;
@@ -190,14 +189,14 @@ void XiaoruiFaceDisplay::SetPowerSaveMode(bool on) {
     }
 }
 
-void XiaoruiFaceDisplay::ArmWakeAck(Face next) {
+void KodoFaceDisplay::ArmWakeAck(Face next) {
     mode_ = next;
     acking_ = true;
     ack_ticks_ = 0;
     Show(Face::kSurprise);
 }
 
-void XiaoruiFaceDisplay::LeaveSleep() {
+void KodoFaceDisplay::LeaveSleep() {
     if (!sleeping_) {
         return;
     }
@@ -208,11 +207,11 @@ void XiaoruiFaceDisplay::LeaveSleep() {
     }
 }
 
-void XiaoruiFaceDisplay::TickThunk(lv_timer_t* timer) {
-    static_cast<XiaoruiFaceDisplay*>(lv_timer_get_user_data(timer))->OnTick();
+void KodoFaceDisplay::TickThunk(lv_timer_t* timer) {
+    static_cast<KodoFaceDisplay*>(lv_timer_get_user_data(timer))->OnTick();
 }
 
-void XiaoruiFaceDisplay::OnTick() {
+void KodoFaceDisplay::OnTick() {
     if (acking_ && ++ack_ticks_ >= 8) {
         acking_ = false;
         Show(mode_);
@@ -298,7 +297,7 @@ void XiaoruiFaceDisplay::OnTick() {
     }
 }
 
-bool XiaoruiFaceDisplay::ClassifyStatus(const char* status, Face* face) const {
+bool KodoFaceDisplay::ClassifyStatus(const char* status, Face* face) const {
     if (strcmp(status, Lang::Strings::LISTENING) == 0) {
         *face = Face::kListen;
         return true;
@@ -322,9 +321,9 @@ bool XiaoruiFaceDisplay::ClassifyStatus(const char* status, Face* face) const {
     return false;
 }
 
-XiaoruiFaceDisplay::Face XiaoruiFaceDisplay::FaceForMode() const { return mode_; }
+KodoFaceDisplay::Face KodoFaceDisplay::FaceForMode() const { return mode_; }
 
-bool XiaoruiFaceDisplay::MapEmotion(const char* emotion, Face* face) const {
+bool KodoFaceDisplay::MapEmotion(const char* emotion, Face* face) const {
     struct Item {
         const char* name;
         Face face;
@@ -374,7 +373,7 @@ bool XiaoruiFaceDisplay::MapEmotion(const char* emotion, Face* face) const {
     return false;
 }
 
-void XiaoruiFaceDisplay::BuildChassis() {
+void KodoFaceDisplay::BuildChassis() {
     antenna_pts_[0] = {160, 28};
     antenna_pts_[1] = {160, 46};
     lv_obj_t* stem = lv_line_create(canvas_);
@@ -399,7 +398,7 @@ void XiaoruiFaceDisplay::BuildChassis() {
     Dot(canvas_, 244, 66, 2, kLineSoft, LV_OPA_COVER);
 }
 
-void XiaoruiFaceDisplay::ClearFeatures() {
+void KodoFaceDisplay::ClearFeatures() {
     eye_l_ = eye_r_ = nullptr;
     pupil_l_ = pupil_r_ = nullptr;
     glint_l_[0] = glint_l_[1] = nullptr;
@@ -420,8 +419,8 @@ void XiaoruiFaceDisplay::ClearFeatures() {
     lv_obj_set_pos(features_, 0, 0);
 }
 
-lv_obj_t* XiaoruiFaceDisplay::Dot(lv_obj_t* parent, int cx, int cy, int r, lv_color_t fill,
-                                  lv_opa_t opa) {
+lv_obj_t* KodoFaceDisplay::Dot(lv_obj_t* parent, int cx, int cy, int r, lv_color_t fill,
+                               lv_opa_t opa) {
     lv_obj_t* obj = Bare(parent);
     lv_obj_set_size(obj, r * 2, r * 2);
     lv_obj_set_pos(obj, cx - r, cy - r);
@@ -431,9 +430,8 @@ lv_obj_t* XiaoruiFaceDisplay::Dot(lv_obj_t* parent, int cx, int cy, int r, lv_co
     return obj;
 }
 
-lv_obj_t* XiaoruiFaceDisplay::Oval(lv_obj_t* parent, int cx, int cy, int rx, int ry,
-                                   lv_color_t fill, lv_opa_t fill_opa, lv_color_t stroke,
-                                   int stroke_w) {
+lv_obj_t* KodoFaceDisplay::Oval(lv_obj_t* parent, int cx, int cy, int rx, int ry, lv_color_t fill,
+                                lv_opa_t fill_opa, lv_color_t stroke, int stroke_w) {
     lv_obj_t* obj = Bare(parent);
     lv_obj_set_size(obj, rx * 2, ry * 2);
     lv_obj_set_pos(obj, cx - rx, cy - ry);
@@ -447,8 +445,8 @@ lv_obj_t* XiaoruiFaceDisplay::Oval(lv_obj_t* parent, int cx, int cy, int rx, int
     return obj;
 }
 
-lv_obj_t* XiaoruiFaceDisplay::Chip(lv_obj_t* parent, int x, int y, int w, int h, int radius,
-                                   lv_color_t fill, lv_color_t stroke, int stroke_w) {
+lv_obj_t* KodoFaceDisplay::Chip(lv_obj_t* parent, int x, int y, int w, int h, int radius,
+                                lv_color_t fill, lv_color_t stroke, int stroke_w) {
     lv_obj_t* obj = Bare(parent);
     lv_obj_set_pos(obj, x, y);
     lv_obj_set_size(obj, w, h);
@@ -460,8 +458,8 @@ lv_obj_t* XiaoruiFaceDisplay::Chip(lv_obj_t* parent, int x, int y, int w, int h,
     return obj;
 }
 
-const lv_point_precise_t* XiaoruiFaceDisplay::AddQuad(int x0, int y0, int cx, int cy, int x1,
-                                                      int y1, uint32_t* count) {
+const lv_point_precise_t* KodoFaceDisplay::AddQuad(int x0, int y0, int cx, int cy, int x1, int y1,
+                                                   uint32_t* count) {
     constexpr int kSteps = 8;
     if (pt_used_ + kSteps + 1 > static_cast<int>(sizeof(pts_) / sizeof(pts_[0]))) {
         *count = 0;
@@ -479,8 +477,7 @@ const lv_point_precise_t* XiaoruiFaceDisplay::AddQuad(int x0, int y0, int cx, in
     return &pts_[start];
 }
 
-const lv_point_precise_t* XiaoruiFaceDisplay::AddSeg(int x0, int y0, int x1, int y1,
-                                                     uint32_t* count) {
+const lv_point_precise_t* KodoFaceDisplay::AddSeg(int x0, int y0, int x1, int y1, uint32_t* count) {
     if (pt_used_ + 2 > static_cast<int>(sizeof(pts_) / sizeof(pts_[0]))) {
         *count = 0;
         return nullptr;
@@ -496,8 +493,8 @@ const lv_point_precise_t* XiaoruiFaceDisplay::AddSeg(int x0, int y0, int x1, int
     return &pts_[start];
 }
 
-lv_obj_t* XiaoruiFaceDisplay::Stroke(const lv_point_precise_t* points, uint32_t count, int width,
-                                     lv_color_t color) {
+lv_obj_t* KodoFaceDisplay::Stroke(const lv_point_precise_t* points, uint32_t count, int width,
+                                  lv_color_t color) {
     if (points == nullptr || count < 2) {
         return nullptr;
     }
@@ -509,8 +506,8 @@ lv_obj_t* XiaoruiFaceDisplay::Stroke(const lv_point_precise_t* points, uint32_t 
     return line;
 }
 
-void XiaoruiFaceDisplay::OpenEye(int cx, int cy, int rx, int ry, int pupil_r, int pupil_dx,
-                                 int pupil_dy, bool left) {
+void KodoFaceDisplay::OpenEye(int cx, int cy, int rx, int ry, int pupil_r, int pupil_dx,
+                              int pupil_dy, bool left) {
     lv_obj_t* white = Oval(features_, cx, cy, rx, ry, kWhite, LV_OPA_COVER, kLine, 3);
     int px = cx + pupil_dx;
     int py = cy + pupil_dy;
@@ -538,18 +535,18 @@ void XiaoruiFaceDisplay::OpenEye(int cx, int cy, int rx, int ry, int pupil_r, in
     }
 }
 
-void XiaoruiFaceDisplay::Crescent(int x0, int y0, int cx, int cy, int x1, int y1, int width) {
+void KodoFaceDisplay::Crescent(int x0, int y0, int cx, int cy, int x1, int y1, int width) {
     uint32_t count = 0;
     const lv_point_precise_t* pts = AddQuad(x0, y0, cx, cy, x1, y1, &count);
     Stroke(pts, count, width, kLine);
 }
 
-void XiaoruiFaceDisplay::Blush(lv_opa_t opa) {
+void KodoFaceDisplay::Blush(lv_opa_t opa) {
     Oval(features_, 84, 138, 16, 10, kBlush, opa, kBlush, 0);
     Oval(features_, 236, 138, 16, 10, kBlush, opa, kBlush, 0);
 }
 
-void XiaoruiFaceDisplay::Show(Face face) {
+void KodoFaceDisplay::Show(Face face) {
     if (antenna_ball_ != nullptr) {
         lv_obj_set_style_bg_opa(antenna_ball_, LV_OPA_COVER, 0);
     }

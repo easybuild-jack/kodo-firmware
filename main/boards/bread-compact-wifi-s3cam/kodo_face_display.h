@@ -4,13 +4,13 @@
 
 #include <cstdint>
 
-// Vector face from docs/xiaorui-face-design (320x240). Eyes, mouth and
+// Vector face from docs/kodo-face-design (320x240). Eyes, mouth and
 // decorations change per expression; the chassis stays put.
-class XiaoruiFaceDisplay : public SpiLcdDisplay {
+class KodoFaceDisplay : public SpiLcdDisplay {
 public:
-    XiaoruiFaceDisplay(esp_lcd_panel_io_handle_t panel_io, esp_lcd_panel_handle_t panel, int width,
-                       int height, int offset_x, int offset_y, bool mirror_x, bool mirror_y,
-                       bool swap_xy);
+    KodoFaceDisplay(esp_lcd_panel_io_handle_t panel_io, esp_lcd_panel_handle_t panel, int width,
+                    int height, int offset_x, int offset_y, bool mirror_x, bool mirror_y,
+                    bool swap_xy);
 
     void SetupUI() override;
     void SetStatus(const char* status) override;
