@@ -174,18 +174,15 @@ void KodoLight::RegisterTools() {
             ambient.speed_ms = properties["speed_ms"].value<int>();
             const bool persist = properties["persist"].value<bool>();
 
-            bool sleeping;
             {
                 std::lock_guard<std::mutex> lock(mutex_);
                 ambient_ = ambient;
-                sleeping = sleeping_;
                 ShowAmbientLocked();
             }
             ESP_LOGI(TAG,
-                     "Ambient set: rgb=(%d,%d,%d) brightness=%d effect=%s speed=%dms persist=%d%s",
+                     "Ambient set: rgb=(%d,%d,%d) brightness=%d effect=%s speed=%dms persist=%d",
                      ambient.color.r, ambient.color.g, ambient.color.b, ambient.brightness,
-                     EffectName(ambient.effect), ambient.speed_ms, persist,
-                     sleeping ? " (shown after wake)" : "");
+                     EffectName(ambient.effect), ambient.speed_ms, persist);
             if (persist) {
                 SaveSettings(ambient);
             }
@@ -231,37 +228,11 @@ void KodoLight::OnStateChanged() {
         ShowAmbientLocked();
         ESP_LOGI(TAG, "Boot done (state=%s): ambient shown, effect=%s",
                  DeviceStateMachine::GetStateName(state), EffectName(ambient_.effect));
-        return;
     }
-    // Matches KodoFaceDisplay: the sleeping face survives the good-night reply and idle,
-    // any other state (wake word, button) wakes the robot.
-    if (!sleeping_ || state == kDeviceStateIdle || state == kDeviceStateSpeaking ||
-        state == kDeviceStateNotifying) {
-        return;
-    }
-    sleeping_ = false;
-    ShowAmbientLocked();
-    ESP_LOGI(TAG, "Wake (state=%s): ambient restored, effect=%s",
-             DeviceStateMachine::GetStateName(state), EffectName(ambient_.effect));
-}
-
-void KodoLight::Sleep() {
-    std::lock_guard<std::mutex> lock(mutex_);
-    if (sleeping_) {
-        return;
-    }
-    sleeping_ = true;
-    starting_ = false;
-    ShowAmbientLocked();
-    ESP_LOGI(TAG, "Sleep: ring off");
 }
 
 void KodoLight::ShowAmbientLocked() {
     if (starting_) {
-        return;
-    }
-    if (sleeping_) {
-        StartModeLocked(Mode::kFadeOut, {}, kFadeOutTickMs);
         return;
     }
     const Rgb color = {Scale(ambient_.color.r, ambient_.brightness),

@@ -7,8 +7,8 @@ the Ogg Opus format the firmware embeds (16 kHz, mono).
 
 Run with the kodo-server environment:
 
-    D:/codespace/kodo-server/.venv/Scripts/python.exe scripts/gen_prompt_sounds.py \
-        --server D:/codespace/kodo-server --ffmpeg <path-to-ffmpeg>
+    D:/codespace/kodo/kodo-server/.venv/Scripts/python.exe scripts/gen_prompt_sounds.py \
+        --server D:/codespace/kodo/kodo-server --ffmpeg <path-to-ffmpeg> [--only name ...]
 
 Rerun scripts/gen_lang.py afterwards only if a file name is added or removed.
 """
@@ -28,6 +28,7 @@ PROMPTS = {
     "laila": "来啦，你说",
     "nonet": "哎呀，我把网络弄丢啦，请帮我检查一下",
     "noserver": "网是通的呀，可是服务器没人应我",
+    "alarm_offline": "起床啦，该起床啦！",
 }
 
 SAMPLE_RATE = 16000
@@ -75,12 +76,17 @@ async def main() -> None:
         type=Path,
         default=Path(__file__).resolve().parent.parent / "main" / "assets" / "common",
     )
+    parser.add_argument(
+        "--only", nargs="+", choices=sorted(PROMPTS), help="regenerate just these clips"
+    )
     args = parser.parse_args()
     out_dir = args.out.resolve()
+    names = args.only or list(PROMPTS)
 
     tts, opts, voice = load_server_tts(args.server.resolve())
     print(f"voice={voice} speed={opts.speed}")
-    for name, text in PROMPTS.items():
+    for name in names:
+        text = PROMPTS[name]
         pcm = await tts.synthesize(text, opts)
         if not pcm:
             raise SystemExit(f"empty audio for {name}: {text}")

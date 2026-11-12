@@ -66,6 +66,9 @@ public:
     virtual void SendStopListening();
     virtual void SendAbortSpeaking(AbortReason reason);
     virtual void SendMcpMessage(const std::string& message);
+    // kodo-server: a local alarm finished ringing; the server answers with a greeting.
+    void SendAlarmFired(const std::string& time_text, const std::string& label,
+                        const std::string& kind);
 
 protected:
     std::function<void(const cJSON* root)> on_incoming_json_;

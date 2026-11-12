@@ -1028,7 +1028,17 @@ void Application::ShowOfflineCommandUi() {
     wake_ack_playing_ = false;
     const char* text = "网是通的呀，可是服务器没人应我";
     auto sound = Lang::Sounds::OGG_NOSERVER;
-    if (offline_fail_reason_ == OfflineFailReason::kNoNetwork) {
+    std::string remind_text;
+    if (alarm_pending_ && alarm_kind_ == "remind") {
+        // The reminder already played its tone; just show what it was for.
+        remind_text = alarm_label_.empty() ? "提醒时间到了" : "提醒：" + alarm_label_;
+        text = remind_text.c_str();
+        sound = {};
+    } else if (alarm_pending_) {
+        // The alarm could not reach the server for its greeting; wake the user locally.
+        text = "起床啦，该起床啦！";
+        sound = Lang::Sounds::OGG_ALARM_OFFLINE;
+    } else if (offline_fail_reason_ == OfflineFailReason::kNoNetwork) {
         text = "哎呀，我把网络弄丢啦，请帮我检查一下";
         sound = Lang::Sounds::OGG_NONET;
     }
@@ -1036,7 +1046,9 @@ void Application::ShowOfflineCommandUi() {
     if (show_offline_greeting_) {
         show_offline_greeting_ = false;
         display->SetChatMessage("assistant", text);
-        audio_service_.PlaySound(sound);
+        if (!sound.empty()) {
+            audio_service_.PlaySound(sound);
+        }
     }
     audio_service_.SetLocalCommandsEnabled(true);
 }
@@ -1115,6 +1127,9 @@ void Application::PlayWakeAck() {
 }
 
 void Application::BeginWakeWordInvoke(const std::string& wake_word) {
+    if (wake_word_callback_) {
+        wake_word_callback_();
+    }
     idle_after_turn_ = false;
     // Local reply first. It does not need a network, and it must start before
     // the uplink attempt so a failed connection still gets an answer.
@@ -1211,6 +1226,7 @@ void Application::HandleStateChangedEvent() {
                     "neutral");  // Then set emotion (wechat mode checks child count)
                 audio_service_.SetLocalCommandsEnabled(false);
             }
+            alarm_pending_ = false;
             audio_service_.EnableVoiceProcessing(false);
             audio_service_.EnableWakeWordDetection(true);
             break;
@@ -1354,6 +1370,10 @@ void Application::StartListeningAudio() {
 
     // Send the start listening command
     protocol_->SendStartListening(listening_mode_);
+    if (alarm_pending_) {
+        alarm_pending_ = false;
+        protocol_->SendAlarmFired(alarm_time_, alarm_label_, alarm_kind_);
+    }
     audio_service_.EnableVoiceProcessing(true);
 
     ConfigureWakeWordForListening();
@@ -1566,6 +1586,36 @@ void Application::WakeWordInvoke(const std::string& wake_word) {
             }
         });
     }
+}
+
+void Application::InvokeAlarm(const std::string& time_text, const std::string& label,
+                              const std::string& kind) {
+    Schedule([this, time_text, label, kind]() {
+        if (!protocol_ || GetDeviceState() != kDeviceStateIdle) {
+            ESP_LOGW(TAG, "Alarm greeting skipped, device is busy");
+            return;
+        }
+        ListeningMode mode = GetDefaultListeningMode();
+        idle_after_turn_ = false;
+        if (!SetDeviceState(kDeviceStateConnecting)) {
+            return;
+        }
+        alarm_pending_ = true;
+        alarm_time_ = time_text;
+        alarm_label_ = label;
+        alarm_kind_ = kind;
+        // Let the state change reach the UI before OpenAudioChannel blocks.
+        Schedule([this, mode]() { ContinueOpenAudioChannel(mode); });
+    });
+}
+
+void Application::EndListeningSession() {
+    Schedule([this]() {
+        if (GetDeviceState() == kDeviceStateListening && protocol_ &&
+            protocol_->IsAudioChannelOpened()) {
+            protocol_->CloseAudioChannel();
+        }
+    });
 }
 
 bool Application::CanEnterSleepMode() {

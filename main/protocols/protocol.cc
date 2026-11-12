@@ -105,6 +105,23 @@ void Protocol::SendMcpMessage(const std::string& payload) {
     SendText(message);
 }
 
+void Protocol::SendAlarmFired(const std::string& time_text, const std::string& label,
+                              const std::string& kind) {
+    cJSON* root = cJSON_CreateObject();
+    cJSON_AddStringToObject(root, "session_id", session_id_.c_str());
+    cJSON_AddStringToObject(root, "type", "x_alarm");
+    cJSON_AddStringToObject(root, "time", time_text.c_str());
+    cJSON_AddStringToObject(root, "label", label.c_str());
+    cJSON_AddStringToObject(root, "kind", kind.c_str());
+    char* json = cJSON_PrintUnformatted(root);
+    cJSON_Delete(root);
+    if (json == nullptr) {
+        return;
+    }
+    SendText(json);
+    cJSON_free(json);
+}
+
 bool Protocol::IsTimeout() const {
     const int kTimeoutSeconds = 120;
     auto now = std::chrono::steady_clock::now();

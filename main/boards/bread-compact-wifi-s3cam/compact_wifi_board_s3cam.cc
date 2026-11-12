@@ -4,6 +4,7 @@
 #include "config.h"
 #include "display/lcd_display.h"
 #include "esp32_camera.h"
+#include "kodo_alarm.h"
 #include "kodo_face_display.h"
 #include "kodo_light.h"
 #include "mcp_server.h"
@@ -24,6 +25,13 @@ bool WantsSleep(const std::string& text) {
         text.find("别睡") != std::string::npos || text.find("睡不着") != std::string::npos ||
         text.find("还没睡") != std::string::npos) {
         return false;
+    }
+    // Setting an alarm ("十一点提醒我睡觉") is not a sleep request.
+    static constexpr const char* kAlarm[] = {"闹钟", "提醒", "叫醒", "叫我"};
+    for (const char* phrase : kAlarm) {
+        if (text.find(phrase) != std::string::npos) {
+            return false;
+        }
     }
     static constexpr const char* kZh[] = {"睡觉", "休眠", "晚安", "去睡", "睡吧", "进入睡眠"};
     for (const char* phrase : kZh) {
@@ -93,6 +101,59 @@ private:
     LcdDisplay* display_;
     Esp32Camera* camera_;
     KodoLight* light_ = nullptr;
+    KodoAlarm* alarm_ = nullptr;
+
+    // Auto sleep: idle, or listening with nobody talking, for kAutoSleepSeconds. Main task only.
+    static constexpr int kAutoSleepSeconds = 60;
+    esp_timer_handle_t auto_sleep_timer_ = nullptr;
+    DeviceState last_state_ = kDeviceStateUnknown;
+    int64_t last_activity_us_ = 0;
+    bool asleep_ = false;
+
+    void InitializeAutoSleep() {
+        last_activity_us_ = esp_timer_get_time();
+        esp_timer_create_args_t args = {};
+        args.callback = [](void* arg) {
+            auto* self = static_cast<CompactWifiBoardS3Cam*>(arg);
+            Application::GetInstance().Schedule([self]() { self->CheckAutoSleep(); });
+        };
+        args.arg = this;
+        args.dispatch_method = ESP_TIMER_TASK;
+        args.name = "auto_sleep";
+        ESP_ERROR_CHECK(esp_timer_create(&args, &auto_sleep_timer_));
+        ESP_ERROR_CHECK(esp_timer_start_periodic(auto_sleep_timer_, 1000 * 1000));
+    }
+
+    void CheckAutoSleep() {
+        auto& app = Application::GetInstance();
+        const DeviceState state = app.GetDeviceState();
+        const int64_t now = esp_timer_get_time();
+        // Every state change (wake word, button, a reply, an alarm greeting) is an interaction.
+        if (state != last_state_) {
+            last_state_ = state;
+            last_activity_us_ = now;
+            if (state != kDeviceStateIdle) {
+                asleep_ = false;
+            }
+            return;
+        }
+        if (asleep_ || (alarm_ != nullptr && alarm_->IsRinging())) {
+            return;
+        }
+        if (state != kDeviceStateIdle && state != kDeviceStateListening) {
+            last_activity_us_ = now;
+            return;
+        }
+        if (now - last_activity_us_ < kAutoSleepSeconds * 1000000LL) {
+            return;
+        }
+        ESP_LOGI(TAG, "No interaction for %d s, going to sleep", kAutoSleepSeconds);
+        asleep_ = true;
+        GetDisplay()->SetPowerSaveMode(true);
+        if (state == kDeviceStateListening) {
+            app.EndListeningSession();
+        }
+    }
 
     void InitializeSpi() {
         spi_bus_config_t buscfg = {};
@@ -181,10 +242,12 @@ private:
         camera_ = new Esp32Camera(config);
     }
 
+    // Sleep dims the screen to the sleeping face only. The LED ring is the user's light and
+    // is only changed by the self.light.* tools.
     void EnterSleep() {
         Application::GetInstance().Schedule([this]() {
+            asleep_ = true;
             GetDisplay()->SetPowerSaveMode(true);
-            light_->Sleep();
             auto& app = Application::GetInstance();
             app.RequestIdleAfterTurn();
             auto state = app.GetDeviceState();
@@ -197,13 +260,18 @@ private:
     void InitializeTools() {
         // Created here so its self.light.* tools exist before the tool list is published.
         light_ = new KodoLight(GPIO_NUM_14, 16);
+        alarm_ = new KodoAlarm([this]() {
+            asleep_ = false;
+            last_activity_us_ = esp_timer_get_time();
+            GetDisplay()->SetPowerSaveMode(false);
+        });
 
         auto& mcp_server = McpServer::GetInstance();
         mcp_server.AddTool(
             "self.device.sleep",
             "Put the robot to sleep when the user asks to sleep, rest, or says good night. "
-            "The screen dims and shows the sleeping face and the LED ring turns off until the "
-            "wake word is heard.",
+            "The screen dims and shows the sleeping face until the wake word is heard. "
+            "The LED ring is not changed.",
             PropertyList(), [this](const PropertyList&) -> ReturnValue {
                 EnterSleep();
                 return true;
@@ -212,6 +280,9 @@ private:
 
     void InitializeButtons() {
         boot_button_.OnClick([this]() {
+            if (alarm_ != nullptr && alarm_->Dismiss()) {
+                return;
+            }
             auto& app = Application::GetInstance();
             if (app.GetDeviceState() == kDeviceStateStarting) {
                 EnterWifiConfigMode();
@@ -257,6 +328,7 @@ public:
         InitializeButtons();
         InitializeCamera();
         InitializeTools();
+        InitializeAutoSleep();
         if (DISPLAY_BACKLIGHT_PIN != GPIO_NUM_NC) {
             GetBacklight()->RestoreBrightness();
         }

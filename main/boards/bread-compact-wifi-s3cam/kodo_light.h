@@ -13,15 +13,14 @@
 #include <vector>
 
 // WS2812 ring that shows the user's ambient light, set through the self.light.* MCP tools.
-// Apart from the boot spinner, device states never change it; the ring goes dark while the
-// robot sleeps and the ambient light comes back when it wakes.
+// Apart from the boot spinner, nothing but those tools changes it: device states and sleep
+// leave the ring as the user set it.
 class KodoLight : public Led {
 public:
     KodoLight(gpio_num_t gpio, uint16_t max_leds);
     ~KodoLight() override;
 
     void OnStateChanged() override;
-    void Sleep();
 
 private:
     enum class Effect { kOff, kSolid, kBreathe, kRainbow };
@@ -47,7 +46,6 @@ private:
     Ambient ambient_;
     // Boot phase: the spinner runs until the first state after kDeviceStateStarting.
     bool starting_ = true;
-    bool sleeping_ = false;
 
     Mode mode_ = Mode::kOff;
     Rgb mode_color_;

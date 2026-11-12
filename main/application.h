@@ -112,6 +112,16 @@ public:
 
     void Reboot();
     void WakeWordInvoke(const std::string& wake_word);
+    // A local alarm finished ringing: open a session and let the server greet the user.
+    // Ignored unless the device is idle. kind is "alarm" or "remind".
+    void InvokeAlarm(const std::string& time_text, const std::string& label,
+                     const std::string& kind);
+    // Close a listening session so the device returns to idle. No-op in other states.
+    void EndListeningSession();
+    // Runs on the main task when a wake word fires, before the local wake reply plays.
+    void OnWakeWordInvoke(std::function<void()> callback) {
+        wake_word_callback_ = std::move(callback);
+    }
     bool UpgradeFirmware(const std::string& url, const std::string& version = "");
     bool CanEnterSleepMode();
     void SendMcpMessage(const std::string& payload);
@@ -172,6 +182,13 @@ private:
     bool server_check_failed_ = false;
     OfflineFailReason offline_fail_reason_ = OfflineFailReason::kNoServer;
     std::string pending_local_command_;
+    // Sent right after the next listen start, so the server never aborts the greeting turn
+    // for that listen start.
+    bool alarm_pending_ = false;
+    std::string alarm_time_;
+    std::string alarm_label_;
+    std::string alarm_kind_;
+    std::function<void()> wake_word_callback_;
     bool pending_listening_start_ =
         false;  // Waiting for playback to drain before starting listening (auto mode)
     int clock_ticks_ = 0;
