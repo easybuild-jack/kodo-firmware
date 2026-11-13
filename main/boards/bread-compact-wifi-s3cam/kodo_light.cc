@@ -231,6 +231,29 @@ void KodoLight::OnStateChanged() {
     }
 }
 
+void KodoLight::SetPower(bool on) {
+    Ambient ambient;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (on) {
+            if (ambient_.effect == Effect::kOff) {
+                ambient_.effect = Effect::kSolid;
+            }
+            if (ambient_.brightness == 0) {
+                ambient_.brightness = 60;
+            }
+        } else {
+            ambient_.effect = Effect::kOff;
+        }
+        ambient = ambient_;
+        ShowAmbientLocked();
+    }
+    ESP_LOGI(TAG, "Power %s: rgb=(%d,%d,%d) brightness=%d effect=%s", on ? "on" : "off",
+             ambient.color.r, ambient.color.g, ambient.color.b, ambient.brightness,
+             EffectName(ambient.effect));
+    SaveSettings(ambient);
+}
+
 void KodoLight::ShowAmbientLocked() {
     if (starting_) {
         return;

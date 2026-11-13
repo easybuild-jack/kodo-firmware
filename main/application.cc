@@ -325,6 +325,10 @@ void Application::Run() {
             auto display = Board::GetInstance().GetDisplay();
             display->UpdateStatusBar();
 
+            if (clock_ticks_ % 30 == 0) {
+                RetryServerTime();
+            }
+
             // Print debug info every 10 seconds
             if (clock_ticks_ % 10 == 0) {
                 SystemInfo::PrintHeapStats();
@@ -423,6 +427,40 @@ void Application::HandleActivationDoneEvent() {
             // Play the success sound to indicate the device is ready
             audio_service_.PlaySound(Lang::Sounds::OGG_SUCCESS);
         });
+    }
+}
+
+void Application::RetryServerTime() {
+    // The clock only comes from the OTA server_time. When the check at boot failed (server
+    // down, slow Wi-Fi), ask again until it works so the status clock and alarms can run.
+    if (!startup_completed_ || activation_task_handle_ != nullptr || time_sync_running_) {
+        return;
+    }
+    time_t now = time(nullptr);
+    struct tm local;
+    localtime_r(&now, &local);
+    if (local.tm_year >= 2025 - 1900) {
+        return;
+    }
+    time_sync_running_ = true;
+    BaseType_t ok = xTaskCreate(
+        [](void* arg) {
+            auto* app = static_cast<Application*>(arg);
+            {
+                Ota ota;
+                auto result = ota.CheckVersion();
+                if (result && ota.HasServerTime()) {
+                    ESP_LOGI(TAG, "Server time set on retry");
+                } else {
+                    ESP_LOGW(TAG, "Server time retry failed");
+                }
+            }
+            app->time_sync_running_ = false;
+            vTaskDelete(nullptr);
+        },
+        "time_sync", 4096 * 2, this, 2, nullptr);
+    if (ok != pdPASS) {
+        time_sync_running_ = false;
     }
 }
 

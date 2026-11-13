@@ -305,10 +305,12 @@ private:
                              text.find("别开") != std::string::npos ||
                              text.find("别关") != std::string::npos;
         if (!refused && text.find("开灯") != std::string::npos) {
+            light_->SetPower(true);
             GetDisplay()->SetChatMessage("assistant", "灯开了");
             return true;
         }
         if (!refused && text.find("关灯") != std::string::npos) {
+            light_->SetPower(false);
             GetDisplay()->SetChatMessage("assistant", "灯关了");
             return true;
         }

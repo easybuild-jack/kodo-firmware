@@ -21,6 +21,8 @@ public:
     ~KodoLight() override;
 
     void OnStateChanged() override;
+    // Offline 开灯/关灯: on restores the last color as a steady light; both are remembered.
+    void SetPower(bool on);
 
 private:
     enum class Effect { kOff, kSolid, kBreathe, kRainbow };

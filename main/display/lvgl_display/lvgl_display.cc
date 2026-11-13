@@ -226,7 +226,7 @@ void LvglDisplay::UpdateStatusBar(bool update_all) {
                 strftime(time_str, sizeof(time_str), "%H:%M", tm_now);
                 SetStatus(time_str);
             }
-        } else {
+        } else if (update_all) {
             ESP_LOGW(TAG, "System time not set (tm_year=%d)", tm_now->tm_year);
         }
     } else {

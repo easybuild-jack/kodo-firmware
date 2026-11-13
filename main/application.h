@@ -6,6 +6,7 @@
 #include <freertos/event_groups.h>
 #include <freertos/task.h>
 
+#include <atomic>
 #include <cstdint>
 #include <deque>
 #include <functional>
@@ -225,6 +226,8 @@ private:
 
     // Activation task (runs in background)
     void ActivationTask();
+    void RetryServerTime();
+    std::atomic<bool> time_sync_running_{false};
 
     // Helper methods
     void CheckAssetsVersion();
