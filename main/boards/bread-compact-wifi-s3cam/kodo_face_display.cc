@@ -3,24 +3,39 @@
 #include "assets/lang_config.h"
 #include "board.h"
 
+#include <esp_random.h>
+
+#include <cmath>
 #include <cstring>
 
 namespace {
 
-const lv_color_t kLine = lv_color_hex(0x4C8DFF);
-const lv_color_t kLineSoft = lv_color_hex(0x8BB6FF);
-const lv_color_t kBg = lv_color_hex(0xEAF3FF);
-const lv_color_t kFace = lv_color_hex(0xFFFAF7);
-const lv_color_t kEar = lv_color_hex(0xF0F6FF);
-const lv_color_t kWhite = lv_color_hex(0xFFFFFF);
-const lv_color_t kPupil = lv_color_hex(0x2A4A7A);
-const lv_color_t kBlush = lv_color_hex(0xFFB7C8);
-const lv_color_t kPink = lv_color_hex(0xFF8FAB);
-const lv_color_t kInk = lv_color_hex(0x2A4A7A);
+const lv_color_t kBg = lv_color_hex(0x0B0F14);
+const lv_color_t kEye = lv_color_hex(0x4FD1FF);
+const lv_color_t kText = lv_color_hex(0xCDEFFF);
+
+constexpr int kLeftX = 100;
+constexpr int kRightX = 220;
+constexpr int kRadius = 24;
+constexpr int kBlinkHeight = 8;
+constexpr int32_t kProgressMax = 1024;
+constexpr uint32_t kTransitionMs = 220;
+constexpr uint32_t kBlinkMs = 150;
+constexpr uint32_t kBlinkGapMs = 3400;
+constexpr uint32_t kBlinkJitterMs = 1200;
+constexpr uint32_t kWakeAckMs = 800;
+constexpr uint32_t kTickMs = 40;
+constexpr lv_opa_t kDotsOpa = 153;
+
+// Sad lids: background-coloured triangles that cut the outer top corner of each eye.
+constexpr int kLidTop = 88;
+constexpr int kLidBottom = 130;
+constexpr int kLidHalf = 40;
 
 lv_obj_t* Bare(lv_obj_t* parent) {
     lv_obj_t* obj = lv_obj_create(parent);
     lv_obj_remove_flag(obj, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_remove_flag(obj, LV_OBJ_FLAG_CLICKABLE);
     lv_obj_set_style_pad_all(obj, 0, 0);
     lv_obj_set_style_border_width(obj, 0, 0);
     lv_obj_set_style_radius(obj, 0, 0);
@@ -28,11 +43,39 @@ lv_obj_t* Bare(lv_obj_t* parent) {
     return obj;
 }
 
+lv_obj_t* Stroke(lv_obj_t* parent, const lv_point_precise_t* pts, uint32_t count, int width) {
+    lv_obj_t* line = lv_line_create(parent);
+    lv_line_set_points(line, pts, count);
+    lv_obj_set_style_line_width(line, width, 0);
+    lv_obj_set_style_line_color(line, kEye, 0);
+    lv_obj_set_style_line_rounded(line, true, 0);
+    lv_obj_add_flag(line, LV_OBJ_FLAG_HIDDEN);
+    return line;
+}
+
 void PaintText(lv_obj_t* label) {
     if (label != nullptr) {
-        lv_obj_set_style_text_color(label, kInk, 0);
+        lv_obj_set_style_text_color(label, kText, 0);
     }
 }
+
+void SetOpa(lv_obj_t* obj, lv_opa_t opa, bool line) {
+    if (obj == nullptr) {
+        return;
+    }
+    if (opa == LV_OPA_TRANSP) {
+        lv_obj_add_flag(obj, LV_OBJ_FLAG_HIDDEN);
+        return;
+    }
+    if (line) {
+        lv_obj_set_style_line_opa(obj, opa, 0);
+    } else {
+        lv_obj_set_style_bg_opa(obj, opa, 0);
+    }
+    lv_obj_remove_flag(obj, LV_OBJ_FLAG_HIDDEN);
+}
+
+int Lerp(int a, int b, int32_t t) { return a + (b - a) * t / kProgressMax; }
 
 }  // namespace
 
@@ -49,9 +92,53 @@ void KodoFaceDisplay::SetupUI() {
     SpiLcdDisplay::SetupUI();
 
     DisplayLockGuard lock(this);
+    ApplyPalette();
+    if (emoji_label_ != nullptr) {
+        lv_obj_add_flag(emoji_label_, LV_OBJ_FLAG_HIDDEN);
+    }
+    if (emoji_image_ != nullptr) {
+        lv_obj_add_flag(emoji_image_, LV_OBJ_FLAG_HIDDEN);
+    }
+    if (emoji_box_ != nullptr) {
+        lv_obj_add_flag(emoji_box_, LV_OBJ_FLAG_HIDDEN);
+    }
+
+    canvas_ = Bare(lv_screen_active());
+    lv_obj_set_size(canvas_, 320, 240);
+    lv_obj_align(canvas_, LV_ALIGN_CENTER, 0, 0);
+    lv_obj_set_style_bg_color(canvas_, kBg, 0);
+    lv_obj_set_style_bg_opa(canvas_, LV_OPA_COVER, 0);
+    BuildFace();
+
+    for (lv_obj_t* layer :
+         {top_bar_, status_bar_, bottom_bar_, preview_image_, low_battery_popup_}) {
+        if (layer != nullptr) {
+            lv_obj_move_foreground(layer);
+        }
+    }
+
+    current_ = Face::kIdle;
+    from_ = to_ = shown_ = Target(Face::kIdle);
+    progress_ = kProgressMax;
+    next_blink_ms_ = lv_tick_get() + kBlinkGapMs;
+    Apply();
+
+    timer_ = lv_timer_create(TickThunk, kTickMs, this);
+    ready_ = true;
+}
+
+void KodoFaceDisplay::SetTheme(Theme* theme) {
+    SpiLcdDisplay::SetTheme(theme);
+    if (setup_ui_called_) {
+        DisplayLockGuard lock(this);
+        ApplyPalette();
+    }
+}
+
+void KodoFaceDisplay::ApplyPalette() {
     lv_obj_t* screen = lv_screen_active();
     lv_obj_set_style_bg_color(screen, kBg, 0);
-    lv_obj_set_style_text_color(screen, kInk, 0);
+    lv_obj_set_style_text_color(screen, kText, 0);
     if (container_ != nullptr) {
         lv_obj_set_style_bg_opa(container_, LV_OPA_TRANSP, 0);
     }
@@ -75,33 +162,281 @@ void KodoFaceDisplay::SetupUI() {
     PaintText(mute_label_);
     PaintText(battery_label_);
     PaintText(chat_message_label_);
-    if (emoji_label_ != nullptr) {
-        lv_obj_add_flag(emoji_label_, LV_OBJ_FLAG_HIDDEN);
-    }
-    if (emoji_image_ != nullptr) {
-        lv_obj_add_flag(emoji_image_, LV_OBJ_FLAG_HIDDEN);
-    }
-    if (emoji_box_ != nullptr) {
-        lv_obj_add_flag(emoji_box_, LV_OBJ_FLAG_HIDDEN);
+}
+
+void KodoFaceDisplay::BuildFace() {
+    for (int i = 0; i < 2; i++) {
+        eye_[i] = Bare(canvas_);
+        lv_obj_set_style_bg_color(eye_[i], kEye, 0);
     }
 
-    canvas_ = Bare(screen);
-    lv_obj_set_size(canvas_, 320, 240);
-    lv_obj_align(canvas_, LV_ALIGN_CENTER, 0, 0);
-    lv_obj_set_style_bg_color(canvas_, kBg, 0);
-    lv_obj_set_style_bg_opa(canvas_, LV_OPA_COVER, 0);
-    BuildChassis();
-    Show(Face::kIdle);
+    // Happy: thick quadratic arcs M(cx-32,136) Q(cx,70) (cx+32,136).
+    constexpr int kSteps = 12;
+    const int centers[2] = {kLeftX, kRightX};
+    for (int i = 0; i < 2; i++) {
+        const int cx = centers[i];
+        for (int s = 0; s <= kSteps; s++) {
+            float t = static_cast<float>(s) / kSteps;
+            float u = 1.f - t;
+            smile_pts_[i][s].x = static_cast<lv_value_precise_t>(
+                u * u * (cx - 32) + 2 * u * t * cx + t * t * (cx + 32) + 0.5f);
+            smile_pts_[i][s].y =
+                static_cast<lv_value_precise_t>(u * u * 136 + 2 * u * t * 70 + t * t * 136 + 0.5f);
+        }
+        smile_[i] = Stroke(canvas_, smile_pts_[i], kSteps + 1, 20);
+    }
 
-    for (lv_obj_t* layer :
-         {top_bar_, status_bar_, bottom_bar_, preview_image_, low_battery_popup_}) {
-        if (layer != nullptr) {
-            lv_obj_move_foreground(layer);
+    // Think: three rising dots towards the upper right.
+    const int dots[3][3] = {{276, 60, 4}, {288, 46, 5}, {302, 30, 6}};
+    for (int i = 0; i < 3; i++) {
+        dot_[i] = Bare(canvas_);
+        lv_obj_set_size(dot_[i], dots[i][2] * 2, dots[i][2] * 2);
+        lv_obj_set_pos(dot_[i], dots[i][0] - dots[i][2], dots[i][1] - dots[i][2]);
+        lv_obj_set_style_radius(dot_[i], LV_RADIUS_CIRCLE, 0);
+        lv_obj_set_style_bg_color(dot_[i], kEye, 0);
+        lv_obj_add_flag(dot_[i], LV_OBJ_FLAG_HIDDEN);
+    }
+
+    // Sleep: two "Z" strokes, M x y h s l -s s h s.
+    const int zz[2][3] = {{250, 70, 16}, {276, 44, 22}};
+    for (int i = 0; i < 2; i++) {
+        const int x = zz[i][0], y = zz[i][1], s = zz[i][2];
+        zz_pts_[i][0] = {static_cast<lv_value_precise_t>(x), static_cast<lv_value_precise_t>(y)};
+        zz_pts_[i][1] = {static_cast<lv_value_precise_t>(x + s),
+                         static_cast<lv_value_precise_t>(y)};
+        zz_pts_[i][2] = {static_cast<lv_value_precise_t>(x),
+                         static_cast<lv_value_precise_t>(y + s)};
+        zz_pts_[i][3] = {static_cast<lv_value_precise_t>(x + s),
+                         static_cast<lv_value_precise_t>(y + s)};
+        zz_[i] = Stroke(canvas_, zz_pts_[i], 4, s / 5 > 3 ? s / 5 : 3);
+    }
+
+    lv_obj_add_event_cb(canvas_, LidDrawThunk, LV_EVENT_DRAW_POST, this);
+}
+
+KodoFaceDisplay::Pose KodoFaceDisplay::Target(Face face) {
+    Pose p = {};
+    p.eye_opa = LV_OPA_COVER;
+    auto both = [&p](int cy, int w, int h) {
+        p.eye[0] = {kLeftX, static_cast<int16_t>(cy), static_cast<int16_t>(w),
+                    static_cast<int16_t>(h), kRadius};
+        p.eye[1] = {kRightX, static_cast<int16_t>(cy), static_cast<int16_t>(w),
+                    static_cast<int16_t>(h), kRadius};
+    };
+    switch (face) {
+        case Face::kIdle:
+            both(120, 64, 84);
+            break;
+        case Face::kHappy:
+            // The eyes squint and fade while the smile arcs fade in.
+            both(116, 64, 20);
+            p.eye_opa = LV_OPA_TRANSP;
+            p.smile_opa = LV_OPA_COVER;
+            break;
+        case Face::kListen:
+            p.eye[0] = {kLeftX, 114, 66, 92, kRadius};
+            p.eye[1] = {kRightX, 112, 72, 100, kRadius};
+            break;
+        case Face::kSpeak:
+            both(120, 66, 84);
+            break;
+        case Face::kThink:
+            p.eye[0] = {kLeftX + 18, 104, 60, 70, kRadius};
+            p.eye[1] = {kRightX + 18, 104, 60, 70, kRadius};
+            p.dots_opa = LV_OPA_COVER;
+            break;
+        case Face::kSurprise:
+            p.eye[0] = {96, 116, 88, 88, 44};
+            p.eye[1] = {224, 116, 88, 88, 44};
+            break;
+        case Face::kSleep:
+            both(134, 70, 10);
+            p.zz_opa = LV_OPA_COVER;
+            break;
+        case Face::kSad:
+            both(128, 64, 70);
+            p.lid_opa = LV_OPA_COVER;
+            break;
+    }
+    return p;
+}
+
+bool KodoFaceDisplay::Blinks(Face face) {
+    return face == Face::kIdle || face == Face::kListen || face == Face::kThink;
+}
+
+void KodoFaceDisplay::Show(Face face) {
+    if (face == current_) {
+        return;
+    }
+    current_ = face;
+    lv_anim_delete(this, BlinkExec);
+    blinking_ = false;
+    blink_ = 0;
+    lv_anim_delete(this, TransitionExec);
+    from_ = shown_;
+    to_ = Target(face);
+    progress_ = 0;
+
+    lv_anim_t a;
+    lv_anim_init(&a);
+    lv_anim_set_var(&a, this);
+    lv_anim_set_exec_cb(&a, TransitionExec);
+    lv_anim_set_values(&a, 0, kProgressMax);
+    lv_anim_set_duration(&a, kTransitionMs);
+    lv_anim_set_path_cb(&a, lv_anim_path_ease_in_out);
+    lv_anim_start(&a);
+}
+
+void KodoFaceDisplay::TransitionExec(void* var, int32_t value) {
+    auto* self = static_cast<KodoFaceDisplay*>(var);
+    self->progress_ = value;
+    if (value >= kProgressMax) {
+        uint32_t now = lv_tick_get();
+        self->speak_start_ms_ = now;
+        self->next_blink_ms_ = now + kBlinkGapMs / 2 + esp_random() % kBlinkJitterMs;
+    }
+    self->Apply();
+}
+
+void KodoFaceDisplay::StartBlink() {
+    blinking_ = true;
+    lv_anim_t a;
+    lv_anim_init(&a);
+    lv_anim_set_var(&a, this);
+    lv_anim_set_exec_cb(&a, BlinkExec);
+    lv_anim_set_values(&a, 0, 2 * kProgressMax);
+    lv_anim_set_duration(&a, kBlinkMs);
+    lv_anim_start(&a);
+}
+
+void KodoFaceDisplay::BlinkExec(void* var, int32_t value) {
+    auto* self = static_cast<KodoFaceDisplay*>(var);
+    self->blink_ = value <= kProgressMax ? value : 2 * kProgressMax - value;
+    if (value >= 2 * kProgressMax) {
+        self->blinking_ = false;
+        self->blink_ = 0;
+        self->next_blink_ms_ = lv_tick_get() + kBlinkGapMs + esp_random() % kBlinkJitterMs;
+    }
+    self->Apply();
+}
+
+void KodoFaceDisplay::Apply() {
+    Pose p;
+    for (int i = 0; i < 2; i++) {
+        const Eye& a = from_.eye[i];
+        const Eye& b = to_.eye[i];
+        p.eye[i].cx = Lerp(a.cx, b.cx, progress_);
+        p.eye[i].cy = Lerp(a.cy, b.cy, progress_);
+        p.eye[i].w = Lerp(a.w, b.w, progress_);
+        p.eye[i].h = Lerp(a.h, b.h, progress_);
+        p.eye[i].max_radius = Lerp(a.max_radius, b.max_radius, progress_);
+    }
+    p.eye_opa = Lerp(from_.eye_opa, to_.eye_opa, progress_);
+    p.smile_opa = Lerp(from_.smile_opa, to_.smile_opa, progress_);
+    p.lid_opa = Lerp(from_.lid_opa, to_.lid_opa, progress_);
+    p.dots_opa = Lerp(from_.dots_opa, to_.dots_opa, progress_);
+    p.zz_opa = Lerp(from_.zz_opa, to_.zz_opa, progress_);
+
+    if (progress_ >= kProgressMax) {
+        if (blink_ > 0 && Blinks(current_)) {
+            for (Eye& e : p.eye) {
+                e.h = Lerp(e.h, kBlinkHeight, blink_);
+            }
+        } else if (current_ == Face::kSpeak) {
+            // Matches the design preview: 84 - 26 * |sin(0.9 * t)| with t in 110 ms frames.
+            float t = static_cast<float>(lv_tick_elaps(speak_start_ms_)) * 0.9f / 110.f;
+            int h = 84 - static_cast<int>(26.f * std::fabs(std::sin(t)) + 0.5f);
+            for (Eye& e : p.eye) {
+                e.h = h;
+            }
         }
     }
+    shown_ = p;
+    Render(p);
+}
 
-    timer_ = lv_timer_create(TickThunk, 100, this);
-    ready_ = true;
+void KodoFaceDisplay::Render(const Pose& p) {
+    const bool force = !rendered_valid_;
+    for (int i = 0; i < 2; i++) {
+        const Eye& e = p.eye[i];
+        const Eye& old = rendered_.eye[i];
+        if (force || e.w != old.w || e.h != old.h) {
+            lv_obj_set_size(eye_[i], e.w, e.h);
+        }
+        if (force || e.cx != old.cx || e.cy != old.cy || e.w != old.w || e.h != old.h) {
+            lv_obj_set_pos(eye_[i], e.cx - e.w / 2, e.cy - e.h / 2);
+        }
+        int r = (e.w < e.h ? e.w : e.h) / 2;
+        int old_r = (old.w < old.h ? old.w : old.h) / 2;
+        r = r < e.max_radius ? r : e.max_radius;
+        old_r = old_r < old.max_radius ? old_r : old.max_radius;
+        if (force || r != old_r) {
+            lv_obj_set_style_radius(eye_[i], r, 0);
+        }
+    }
+    if (force || p.eye_opa != rendered_.eye_opa) {
+        SetOpa(eye_[0], p.eye_opa, false);
+        SetOpa(eye_[1], p.eye_opa, false);
+    }
+    if (force || p.smile_opa != rendered_.smile_opa) {
+        SetOpa(smile_[0], p.smile_opa, true);
+        SetOpa(smile_[1], p.smile_opa, true);
+    }
+    if (force || p.dots_opa != rendered_.dots_opa) {
+        for (lv_obj_t* dot : dot_) {
+            SetOpa(dot, p.dots_opa * kDotsOpa / LV_OPA_COVER, false);
+        }
+    }
+    if (force || p.zz_opa != rendered_.zz_opa) {
+        SetOpa(zz_[0], p.zz_opa, true);
+        SetOpa(zz_[1], p.zz_opa, true);
+    }
+    if (force || p.lid_opa != rendered_.lid_opa) {
+        lv_area_t area;
+        lv_obj_get_coords(canvas_, &area);
+        const int32_t x0 = area.x1;
+        const int32_t y0 = area.y1;
+        area.x1 = x0 + kLeftX - kLidHalf - 1;
+        area.x2 = x0 + kRightX + kLidHalf + 1;
+        area.y1 = y0 + kLidTop - 1;
+        area.y2 = y0 + kLidBottom + 1;
+        lv_obj_invalidate_area(canvas_, &area);
+    }
+    rendered_ = p;
+    rendered_valid_ = true;
+}
+
+void KodoFaceDisplay::LidDrawThunk(lv_event_t* e) {
+    auto* self = static_cast<KodoFaceDisplay*>(lv_event_get_user_data(e));
+    const lv_opa_t opa = self->rendered_.lid_opa;
+    if (opa == LV_OPA_TRANSP) {
+        return;
+    }
+    lv_layer_t* layer = lv_event_get_layer(e);
+    lv_area_t area;
+    lv_obj_get_coords(self->canvas_, &area);
+    const int32_t x0 = area.x1;
+    const int32_t y0 = area.y1;
+    const int32_t lids[2][3][2] = {
+        {{kLeftX - kLidHalf, kLidTop},
+         {kLeftX + kLidHalf, kLidTop},
+         {kLeftX - kLidHalf, kLidBottom}},
+        {{kRightX - kLidHalf, kLidTop},
+         {kRightX + kLidHalf, kLidTop},
+         {kRightX + kLidHalf, kLidBottom}},
+    };
+    for (const auto& lid : lids) {
+        lv_draw_triangle_dsc_t dsc;
+        lv_draw_triangle_dsc_init(&dsc);
+        dsc.color = kBg;
+        dsc.opa = opa;
+        for (int i = 0; i < 3; i++) {
+            dsc.p[i].x = x0 + lid[i][0];
+            dsc.p[i].y = y0 + lid[i][1];
+        }
+        lv_draw_triangle(layer, &dsc);
+    }
 }
 
 void KodoFaceDisplay::SetStatus(const char* status) {
@@ -150,16 +485,12 @@ bool KodoFaceDisplay::SetEmotion(const char* emotion) {
         return true;
     }
     if (strcmp(emotion, "neutral") == 0 || strcmp(emotion, "robot_2") == 0) {
-        Show(sleeping_ ? Face::kSleep : FaceForMode());
+        Show(sleeping_ ? Face::kSleep : mode_);
         return true;
     }
     Face face;
     if (!MapEmotion(emotion, &face)) {
         return false;
-    }
-    if (sleeping_ && face == Face::kSleep) {
-        Show(Face::kSleep);
-        return true;
     }
     Show(face);
     return true;
@@ -192,7 +523,7 @@ void KodoFaceDisplay::SetPowerSaveMode(bool on) {
 void KodoFaceDisplay::ArmWakeAck(Face next) {
     mode_ = next;
     acking_ = true;
-    ack_ticks_ = 0;
+    ack_start_ms_ = lv_tick_get();
     Show(Face::kSurprise);
 }
 
@@ -212,88 +543,18 @@ void KodoFaceDisplay::TickThunk(lv_timer_t* timer) {
 }
 
 void KodoFaceDisplay::OnTick() {
-    if (acking_ && ++ack_ticks_ >= 8) {
+    if (acking_ && lv_tick_elaps(ack_start_ms_) >= kWakeAckMs) {
         acking_ = false;
         Show(mode_);
     }
-    if (current_ == Face::kIdle && blinkable_ && eye_l_ != nullptr && eye_r_ != nullptr &&
-        pupil_l_ != nullptr && pupil_r_ != nullptr && glint_l_[0] != nullptr &&
-        glint_l_[1] != nullptr && glint_r_[0] != nullptr && glint_r_[1] != nullptr) {
-        blink_tick_++;
-        if (!blinking_ && blink_tick_ >= 50) {
-            blinking_ = true;
-            blink_tick_ = 0;
-            lv_obj_set_size(eye_l_, eye_l_rx_ * 2, 6);
-            lv_obj_set_pos(eye_l_, eye_l_cx_ - eye_l_rx_, eye_l_cy_ - 3);
-            lv_obj_set_size(eye_r_, eye_r_rx_ * 2, 6);
-            lv_obj_set_pos(eye_r_, eye_r_cx_ - eye_r_rx_, eye_r_cy_ - 3);
-            lv_obj_add_flag(pupil_l_, LV_OBJ_FLAG_HIDDEN);
-            lv_obj_add_flag(pupil_r_, LV_OBJ_FLAG_HIDDEN);
-            lv_obj_add_flag(glint_l_[0], LV_OBJ_FLAG_HIDDEN);
-            lv_obj_add_flag(glint_l_[1], LV_OBJ_FLAG_HIDDEN);
-            lv_obj_add_flag(glint_r_[0], LV_OBJ_FLAG_HIDDEN);
-            lv_obj_add_flag(glint_r_[1], LV_OBJ_FLAG_HIDDEN);
-        } else if (blinking_ && blink_tick_ >= 2) {
-            blinking_ = false;
-            blink_tick_ = 0;
-            lv_obj_set_size(eye_l_, eye_l_rx_ * 2, eye_l_ry_ * 2);
-            lv_obj_set_pos(eye_l_, eye_l_cx_ - eye_l_rx_, eye_l_cy_ - eye_l_ry_);
-            lv_obj_set_size(eye_r_, eye_r_rx_ * 2, eye_r_ry_ * 2);
-            lv_obj_set_pos(eye_r_, eye_r_cx_ - eye_r_rx_, eye_r_cy_ - eye_r_ry_);
-            lv_obj_remove_flag(pupil_l_, LV_OBJ_FLAG_HIDDEN);
-            lv_obj_remove_flag(pupil_r_, LV_OBJ_FLAG_HIDDEN);
-            lv_obj_remove_flag(glint_l_[0], LV_OBJ_FLAG_HIDDEN);
-            lv_obj_remove_flag(glint_l_[1], LV_OBJ_FLAG_HIDDEN);
-            lv_obj_remove_flag(glint_r_[0], LV_OBJ_FLAG_HIDDEN);
-            lv_obj_remove_flag(glint_r_[1], LV_OBJ_FLAG_HIDDEN);
-        }
+    if (progress_ < kProgressMax) {
+        return;
     }
-
-    if (current_ == Face::kListen && wave_[0] != nullptr) {
-        blink_tick_++;
-        if (blink_tick_ >= 4) {
-            blink_tick_ = 0;
-            wave_on_ = !wave_on_;
-            if (wave_on_) {
-                lv_obj_remove_flag(wave_[0], LV_OBJ_FLAG_HIDDEN);
-                lv_obj_remove_flag(wave_[1], LV_OBJ_FLAG_HIDDEN);
-            } else {
-                lv_obj_add_flag(wave_[0], LV_OBJ_FLAG_HIDDEN);
-                lv_obj_add_flag(wave_[1], LV_OBJ_FLAG_HIDDEN);
-            }
-        }
-    }
-
-    if (current_ == Face::kSpeak && mouth_ != nullptr) {
-        mouth_open_ = !mouth_open_;
-        int rx = mouth_open_ ? mouth_rx_ : 8;
-        int ry = mouth_open_ ? mouth_ry_ : 6;
-        lv_obj_set_size(mouth_, rx * 2, ry * 2);
-        lv_obj_set_pos(mouth_, mouth_cx_ - rx, mouth_cy_ - ry);
-        if (chin_mid_ != nullptr) {
-            lv_obj_set_style_bg_opa(chin_mid_, mouth_open_ ? LV_OPA_COVER : LV_OPA_40, 0);
-        }
-    }
-
-    if (current_ == Face::kThink && think_dot_[0] != nullptr) {
-        blink_tick_++;
-        if (blink_tick_ >= 3) {
-            blink_tick_ = 0;
-            think_step_ = (think_step_ + 1) % 3;
-            for (int i = 0; i < 3; i++) {
-                lv_obj_set_style_bg_opa(think_dot_[i], i == think_step_ ? LV_OPA_COVER : LV_OPA_30,
-                                        0);
-            }
-        }
-    }
-
-    if (current_ == Face::kSurprise && antenna_ball_ != nullptr) {
-        blink_tick_++;
-        if (blink_tick_ >= 3) {
-            blink_tick_ = 0;
-            wave_on_ = !wave_on_;
-            lv_obj_set_style_bg_opa(antenna_ball_, wave_on_ ? LV_OPA_COVER : LV_OPA_40, 0);
-        }
+    if (current_ == Face::kSpeak) {
+        Apply();
+    } else if (Blinks(current_) && !blinking_ &&
+               static_cast<int32_t>(lv_tick_get() - next_blink_ms_) >= 0) {
+        StartBlink();
     }
 }
 
@@ -315,13 +576,11 @@ bool KodoFaceDisplay::ClassifyStatus(const char* status, Face* face) const {
         return true;
     }
     if (strcmp(status, Lang::Strings::ERROR) == 0) {
-        *face = Face::kOops;
+        *face = Face::kSad;
         return true;
     }
     return false;
 }
-
-KodoFaceDisplay::Face KodoFaceDisplay::FaceForMode() const { return mode_; }
 
 bool KodoFaceDisplay::MapEmotion(const char* emotion, Face* face) const {
     struct Item {
@@ -329,40 +588,18 @@ bool KodoFaceDisplay::MapEmotion(const char* emotion, Face* face) const {
         Face face;
     };
     static constexpr Item kMap[] = {
-        {"idle", Face::kIdle},
-        {"listen", Face::kListen},
-        {"listening", Face::kListen},
-        {"speak", Face::kSpeak},
-        {"speaking", Face::kSpeak},
-        {"think", Face::kThink},
-        {"thinking", Face::kThink},
-        {"happy", Face::kHappy},
-        {"laughing", Face::kHappy},
-        {"funny", Face::kHappy},
-        {"cool", Face::kHappy},
-        {"confident", Face::kHappy},
-        {"relaxed", Face::kHappy},
-        {"delicious", Face::kHappy},
-        {"silly", Face::kHappy},
-        {"wink", Face::kWink},
-        {"winking", Face::kWink},
-        {"surprise", Face::kSurprise},
-        {"surprised", Face::kSurprise},
-        {"shocked", Face::kSurprise},
-        {"confuse", Face::kConfuse},
-        {"confused", Face::kConfuse},
-        {"sad", Face::kSad},
-        {"crying", Face::kSad},
-        {"sleep", Face::kSleep},
-        {"sleepy", Face::kSleep},
-        {"look", Face::kLook},
-        {"love", Face::kLove},
-        {"loving", Face::kLove},
-        {"kissy", Face::kLove},
-        {"shy", Face::kShy},
-        {"embarrassed", Face::kShy},
-        {"oops", Face::kOops},
-        {"angry", Face::kOops},
+        {"idle", Face::kIdle},         {"listen", Face::kListen},      {"listening", Face::kListen},
+        {"look", Face::kListen},       {"speak", Face::kSpeak},        {"speaking", Face::kSpeak},
+        {"think", Face::kThink},       {"thinking", Face::kThink},     {"confuse", Face::kThink},
+        {"confused", Face::kThink},    {"happy", Face::kHappy},        {"laughing", Face::kHappy},
+        {"funny", Face::kHappy},       {"cool", Face::kHappy},         {"confident", Face::kHappy},
+        {"relaxed", Face::kHappy},     {"delicious", Face::kHappy},    {"silly", Face::kHappy},
+        {"wink", Face::kHappy},        {"winking", Face::kHappy},      {"love", Face::kHappy},
+        {"loving", Face::kHappy},      {"kissy", Face::kHappy},        {"shy", Face::kHappy},
+        {"surprise", Face::kSurprise}, {"surprised", Face::kSurprise}, {"shocked", Face::kSurprise},
+        {"sleep", Face::kSleep},       {"sleepy", Face::kSleep},       {"sad", Face::kSad},
+        {"crying", Face::kSad},        {"embarrassed", Face::kSad},    {"oops", Face::kSad},
+        {"angry", Face::kSad},
     };
     for (const Item& item : kMap) {
         if (strcmp(emotion, item.name) == 0) {
@@ -371,325 +608,4 @@ bool KodoFaceDisplay::MapEmotion(const char* emotion, Face* face) const {
         }
     }
     return false;
-}
-
-void KodoFaceDisplay::BuildChassis() {
-    antenna_pts_[0] = {160, 28};
-    antenna_pts_[1] = {160, 46};
-    lv_obj_t* stem = lv_line_create(canvas_);
-    lv_line_set_points(stem, antenna_pts_, 2);
-    lv_obj_set_style_line_width(stem, 3, 0);
-    lv_obj_set_style_line_color(stem, kLine, 0);
-    lv_obj_set_style_line_rounded(stem, true, 0);
-
-    antenna_ball_ = Dot(canvas_, 160, 22, 8, kLine, LV_OPA_COVER);
-    Dot(canvas_, 162, 19, 2, kWhite, 204);
-
-    Chip(canvas_, 30, 90, 26, 52, 13, kEar, kLine, 3);
-    Chip(canvas_, 264, 90, 26, 52, 13, kEar, kLine, 3);
-    Dot(canvas_, 43, 104, 3, kLineSoft, LV_OPA_COVER);
-    Dot(canvas_, 277, 104, 3, kLineSoft, LV_OPA_COVER);
-
-    Chip(canvas_, 60, 50, 200, 152, 36, kFace, kLine, 3);
-    Dot(canvas_, 148, 186, 3, kLineSoft, 178);
-    chin_mid_ = Dot(canvas_, 160, 186, 3, kLine, 217);
-    Dot(canvas_, 172, 186, 3, kLineSoft, 178);
-    Dot(canvas_, 76, 66, 2, kLineSoft, LV_OPA_COVER);
-    Dot(canvas_, 244, 66, 2, kLineSoft, LV_OPA_COVER);
-}
-
-void KodoFaceDisplay::ClearFeatures() {
-    eye_l_ = eye_r_ = nullptr;
-    pupil_l_ = pupil_r_ = nullptr;
-    glint_l_[0] = glint_l_[1] = nullptr;
-    glint_r_[0] = glint_r_[1] = nullptr;
-    mouth_ = nullptr;
-    wave_[0] = wave_[1] = nullptr;
-    think_dot_[0] = think_dot_[1] = think_dot_[2] = nullptr;
-    blinkable_ = false;
-    blinking_ = false;
-    blink_tick_ = 0;
-    if (features_ != nullptr) {
-        lv_obj_del(features_);
-        features_ = nullptr;
-    }
-    pt_used_ = 0;
-    features_ = Bare(canvas_);
-    lv_obj_set_size(features_, 320, 240);
-    lv_obj_set_pos(features_, 0, 0);
-}
-
-lv_obj_t* KodoFaceDisplay::Dot(lv_obj_t* parent, int cx, int cy, int r, lv_color_t fill,
-                               lv_opa_t opa) {
-    lv_obj_t* obj = Bare(parent);
-    lv_obj_set_size(obj, r * 2, r * 2);
-    lv_obj_set_pos(obj, cx - r, cy - r);
-    lv_obj_set_style_radius(obj, LV_RADIUS_CIRCLE, 0);
-    lv_obj_set_style_bg_color(obj, fill, 0);
-    lv_obj_set_style_bg_opa(obj, opa, 0);
-    return obj;
-}
-
-lv_obj_t* KodoFaceDisplay::Oval(lv_obj_t* parent, int cx, int cy, int rx, int ry, lv_color_t fill,
-                                lv_opa_t fill_opa, lv_color_t stroke, int stroke_w) {
-    lv_obj_t* obj = Bare(parent);
-    lv_obj_set_size(obj, rx * 2, ry * 2);
-    lv_obj_set_pos(obj, cx - rx, cy - ry);
-    lv_obj_set_style_radius(obj, LV_RADIUS_CIRCLE, 0);
-    lv_obj_set_style_bg_color(obj, fill, 0);
-    lv_obj_set_style_bg_opa(obj, fill_opa, 0);
-    if (stroke_w > 0) {
-        lv_obj_set_style_border_width(obj, stroke_w, 0);
-        lv_obj_set_style_border_color(obj, stroke, 0);
-    }
-    return obj;
-}
-
-lv_obj_t* KodoFaceDisplay::Chip(lv_obj_t* parent, int x, int y, int w, int h, int radius,
-                                lv_color_t fill, lv_color_t stroke, int stroke_w) {
-    lv_obj_t* obj = Bare(parent);
-    lv_obj_set_pos(obj, x, y);
-    lv_obj_set_size(obj, w, h);
-    lv_obj_set_style_radius(obj, radius, 0);
-    lv_obj_set_style_bg_color(obj, fill, 0);
-    lv_obj_set_style_bg_opa(obj, LV_OPA_COVER, 0);
-    lv_obj_set_style_border_width(obj, stroke_w, 0);
-    lv_obj_set_style_border_color(obj, stroke, 0);
-    return obj;
-}
-
-const lv_point_precise_t* KodoFaceDisplay::AddQuad(int x0, int y0, int cx, int cy, int x1, int y1,
-                                                   uint32_t* count) {
-    constexpr int kSteps = 8;
-    if (pt_used_ + kSteps + 1 > static_cast<int>(sizeof(pts_) / sizeof(pts_[0]))) {
-        *count = 0;
-        return nullptr;
-    }
-    int start = pt_used_;
-    for (int i = 0; i <= kSteps; i++) {
-        float t = static_cast<float>(i) / kSteps;
-        float u = 1.f - t;
-        pts_[pt_used_].x = static_cast<int>(u * u * x0 + 2 * u * t * cx + t * t * x1 + 0.5f);
-        pts_[pt_used_].y = static_cast<int>(u * u * y0 + 2 * u * t * cy + t * t * y1 + 0.5f);
-        pt_used_++;
-    }
-    *count = kSteps + 1;
-    return &pts_[start];
-}
-
-const lv_point_precise_t* KodoFaceDisplay::AddSeg(int x0, int y0, int x1, int y1, uint32_t* count) {
-    if (pt_used_ + 2 > static_cast<int>(sizeof(pts_) / sizeof(pts_[0]))) {
-        *count = 0;
-        return nullptr;
-    }
-    int start = pt_used_;
-    pts_[pt_used_].x = x0;
-    pts_[pt_used_].y = y0;
-    pt_used_++;
-    pts_[pt_used_].x = x1;
-    pts_[pt_used_].y = y1;
-    pt_used_++;
-    *count = 2;
-    return &pts_[start];
-}
-
-lv_obj_t* KodoFaceDisplay::Stroke(const lv_point_precise_t* points, uint32_t count, int width,
-                                  lv_color_t color) {
-    if (points == nullptr || count < 2) {
-        return nullptr;
-    }
-    lv_obj_t* line = lv_line_create(features_);
-    lv_line_set_points(line, points, count);
-    lv_obj_set_style_line_width(line, width, 0);
-    lv_obj_set_style_line_color(line, color, 0);
-    lv_obj_set_style_line_rounded(line, true, 0);
-    return line;
-}
-
-void KodoFaceDisplay::OpenEye(int cx, int cy, int rx, int ry, int pupil_r, int pupil_dx,
-                              int pupil_dy, bool left) {
-    lv_obj_t* white = Oval(features_, cx, cy, rx, ry, kWhite, LV_OPA_COVER, kLine, 3);
-    int px = cx + pupil_dx;
-    int py = cy + pupil_dy;
-    lv_obj_t* pupil = Dot(features_, px, py, pupil_r, kPupil, LV_OPA_COVER);
-    lv_obj_t* hi = Dot(features_, px + 3, py - 3, 2, kWhite, LV_OPA_COVER);
-    lv_obj_t* lo = Dot(features_, px - 3, py + 2, 1, kWhite, 178);
-    if (left) {
-        eye_l_ = white;
-        pupil_l_ = pupil;
-        glint_l_[0] = hi;
-        glint_l_[1] = lo;
-        eye_l_cx_ = cx;
-        eye_l_cy_ = cy;
-        eye_l_rx_ = rx;
-        eye_l_ry_ = ry;
-    } else {
-        eye_r_ = white;
-        pupil_r_ = pupil;
-        glint_r_[0] = hi;
-        glint_r_[1] = lo;
-        eye_r_cx_ = cx;
-        eye_r_cy_ = cy;
-        eye_r_rx_ = rx;
-        eye_r_ry_ = ry;
-    }
-}
-
-void KodoFaceDisplay::Crescent(int x0, int y0, int cx, int cy, int x1, int y1, int width) {
-    uint32_t count = 0;
-    const lv_point_precise_t* pts = AddQuad(x0, y0, cx, cy, x1, y1, &count);
-    Stroke(pts, count, width, kLine);
-}
-
-void KodoFaceDisplay::Blush(lv_opa_t opa) {
-    Oval(features_, 84, 138, 16, 10, kBlush, opa, kBlush, 0);
-    Oval(features_, 236, 138, 16, 10, kBlush, opa, kBlush, 0);
-}
-
-void KodoFaceDisplay::Show(Face face) {
-    if (antenna_ball_ != nullptr) {
-        lv_obj_set_style_bg_opa(antenna_ball_, LV_OPA_COVER, 0);
-    }
-    ClearFeatures();
-    current_ = face;
-
-    uint32_t count = 0;
-    switch (face) {
-        case Face::kIdle:
-            Blush(102);
-            OpenEye(114, 108, 18, 20, 7, 0, 1, true);
-            OpenEye(206, 108, 18, 20, 7, 0, 1, false);
-            blinkable_ = true;
-            Crescent(146, 150, 160, 162, 174, 150, 4);
-            break;
-        case Face::kListen:
-            Blush(102);
-            OpenEye(114, 108, 20, 22, 8, 0, 1, true);
-            OpenEye(206, 108, 20, 22, 8, 0, 1, false);
-            mouth_ = Oval(features_, 160, 154, 7, 5, kPink, 178, kLine, 2);
-            Stroke(AddQuad(48, 100, 40, 120, 48, 140, &count), count, 3, kLineSoft);
-            wave_[0] = Stroke(AddQuad(38, 92, 26, 120, 38, 148, &count), count, 3, kLineSoft);
-            Stroke(AddQuad(272, 100, 280, 120, 272, 140, &count), count, 3, kLineSoft);
-            wave_[1] = Stroke(AddQuad(282, 92, 294, 120, 282, 148, &count), count, 3, kLineSoft);
-            break;
-        case Face::kSpeak:
-            Blush(102);
-            OpenEye(114, 108, 18, 20, 7, 0, 1, true);
-            OpenEye(206, 108, 18, 20, 7, 0, 1, false);
-            mouth_cx_ = 160;
-            mouth_cy_ = 154;
-            mouth_rx_ = 13;
-            mouth_ry_ = 11;
-            mouth_open_ = true;
-            mouth_ =
-                Oval(features_, mouth_cx_, mouth_cy_, mouth_rx_, mouth_ry_, kPink, 191, kLine, 2);
-            break;
-        case Face::kThink:
-            Blush(102);
-            OpenEye(114, 108, 18, 19, 7, 5, -3, true);
-            OpenEye(206, 108, 18, 19, 7, 5, -3, false);
-            Stroke(AddSeg(150, 150, 170, 150, &count), count, 3, kLine);
-            think_dot_[0] = Dot(features_, 248, 56, 4, kLine, LV_OPA_COVER);
-            think_dot_[1] = Dot(features_, 262, 44, 6, kLine, LV_OPA_30);
-            think_dot_[2] = Dot(features_, 278, 30, 8, kLine, LV_OPA_30);
-            break;
-        case Face::kHappy:
-            Blush(217);
-            Crescent(96, 110, 114, 94, 132, 110, 4);
-            Crescent(188, 110, 206, 94, 224, 110, 4);
-            Crescent(140, 148, 160, 168, 180, 148, 4);
-            break;
-        case Face::kWink:
-            Blush(217);
-            Crescent(96, 110, 114, 94, 132, 110, 4);
-            Stroke(AddSeg(190, 108, 222, 108, &count), count, 4, kLine);
-            Crescent(140, 148, 160, 168, 180, 148, 4);
-            Dot(features_, 236, 98, 4, kLineSoft, LV_OPA_COVER);
-            break;
-        case Face::kSurprise:
-            Blush(102);
-            OpenEye(114, 108, 22, 24, 8, 0, 2, true);
-            OpenEye(206, 108, 22, 24, 8, 0, 2, false);
-            Oval(features_, 160, 152, 8, 10, kFace, LV_OPA_TRANSP, kLine, 3);
-            break;
-        case Face::kConfuse:
-            Blush(102);
-            OpenEye(114, 108, 18, 20, 7, 0, 1, true);
-            OpenEye(206, 108, 22, 24, 8, 0, 2, false);
-            Stroke(AddQuad(144, 150, 154, 158, 160, 150, &count), count, 3, kLine);
-            Stroke(AddQuad(160, 150, 166, 142, 176, 150, &count), count, 3, kLine);
-            {
-                lv_obj_t* mark = lv_label_create(features_);
-                lv_label_set_text(mark, "?");
-                lv_obj_set_pos(mark, 248, 18);
-                lv_obj_set_style_text_color(mark, kLine, 0);
-            }
-            break;
-        case Face::kSad:
-            Blush(102);
-            OpenEye(114, 112, 18, 17, 7, 0, 1, true);
-            OpenEye(206, 112, 18, 17, 7, 0, 1, false);
-            Crescent(100, 96, 114, 102, 128, 96, 3);
-            Crescent(192, 96, 206, 102, 220, 96, 3);
-            Crescent(144, 158, 160, 146, 176, 158, 3);
-            Oval(features_, 224, 136, 4, 7, kLineSoft, LV_OPA_COVER, kLineSoft, 0);
-            break;
-        case Face::kSleep:
-            Crescent(98, 108, 114, 115, 130, 108, 4);
-            Crescent(190, 108, 206, 115, 222, 108, 4);
-            Crescent(152, 150, 160, 156, 168, 150, 3);
-            {
-                lv_obj_t* z1 = lv_label_create(features_);
-                lv_label_set_text(z1, "z");
-                lv_obj_set_pos(z1, 228, 34);
-                lv_obj_set_style_text_color(z1, kLineSoft, 0);
-                lv_obj_t* z2 = lv_label_create(features_);
-                lv_label_set_text(z2, "z");
-                lv_obj_set_pos(z2, 246, 18);
-                lv_obj_set_style_text_color(z2, kLineSoft, 0);
-            }
-            break;
-        case Face::kLook:
-            OpenEye(114, 108, 20, 22, 9, 0, 1, true);
-            OpenEye(206, 108, 20, 22, 9, 0, 1, false);
-            Stroke(AddSeg(150, 150, 170, 150, &count), count, 3, kLine);
-            Stroke(AddSeg(40, 40, 68, 40, &count), count, 3, kLine);
-            Stroke(AddSeg(68, 40, 68, 54, &count), count, 3, kLine);
-            Stroke(AddSeg(280, 40, 252, 40, &count), count, 3, kLine);
-            Stroke(AddSeg(252, 40, 252, 54, &count), count, 3, kLine);
-            Stroke(AddSeg(40, 200, 68, 200, &count), count, 3, kLine);
-            Stroke(AddSeg(68, 200, 68, 186, &count), count, 3, kLine);
-            Stroke(AddSeg(280, 200, 252, 200, &count), count, 3, kLine);
-            Stroke(AddSeg(252, 200, 252, 186, &count), count, 3, kLine);
-            break;
-        case Face::kLove:
-            Blush(217);
-            Dot(features_, 106, 104, 8, kPink, LV_OPA_COVER);
-            Dot(features_, 122, 104, 8, kPink, LV_OPA_COVER);
-            Dot(features_, 114, 114, 10, kPink, LV_OPA_COVER);
-            Dot(features_, 198, 104, 8, kPink, LV_OPA_COVER);
-            Dot(features_, 214, 104, 8, kPink, LV_OPA_COVER);
-            Dot(features_, 206, 114, 10, kPink, LV_OPA_COVER);
-            Crescent(140, 148, 160, 168, 180, 148, 4);
-            Dot(features_, 36, 78, 8, kPink, 230);
-            Dot(features_, 284, 86, 8, kPink, 230);
-            break;
-        case Face::kShy:
-            Blush(230);
-            Crescent(96, 110, 114, 94, 132, 110, 4);
-            OpenEye(206, 108, 17, 16, 6, -3, 1, false);
-            mouth_ = Oval(features_, 160, 152, 6, 4, kPink, 204, kLine, 2);
-            break;
-        case Face::kOops:
-            Stroke(AddSeg(102, 96, 126, 120, &count), count, 4, kLine);
-            Stroke(AddSeg(126, 96, 102, 120, &count), count, 4, kLine);
-            Stroke(AddSeg(194, 96, 218, 120, &count), count, 4, kLine);
-            Stroke(AddSeg(218, 96, 194, 120, &count), count, 4, kLine);
-            Stroke(AddQuad(144, 150, 154, 158, 160, 150, &count), count, 3, kLine);
-            Stroke(AddQuad(160, 150, 166, 142, 176, 150, &count), count, 3, kLine);
-            Oval(features_, 160, 30, 11, 11, kBg, LV_OPA_TRANSP, kLine, 3);
-            Stroke(AddSeg(160, 24, 160, 32, &count), count, 3, kLine);
-            Dot(features_, 160, 37, 2, kLine, LV_OPA_COVER);
-            break;
-    }
 }
