@@ -4,7 +4,7 @@ Kodo 桌面英语陪练机器人使用的板子（唤醒词：小睿同学）。
 
 - 摄像头：OV2640（传感器直接输出 JPEG，XCLK 10 MHz）
 - 麦克风：INMP441；功放：MAX98357A
-- 屏幕：ST7789 2.0 寸 320x240，显示 Kodo 矢量表情（`kodo_face_display.*`，设计稿见 `docs/kodo-face-design/`）
+- 屏幕：ST7789 2.0 寸 320x240，显示 Kodo「豆豆眼」表情（`kodo_face_display.*`，设计稿见 `docs/kodo-face-design/`）
 - 灯环：16 颗 WS2812，接 GPIO14（`kodo_light.*`，MCP 工具 `self.light.set` / `self.light.get_state`）
 
 注意因为摄像头占用 IO 较多，所以占用了 ESP32S3 的 USB 19 20 两个引脚。
